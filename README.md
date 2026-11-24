@@ -59,11 +59,7 @@ He cannot see other projects, cannot use `docker` or `sudo`, and cannot reach th
 
 ## Levels of access
 
-There are three kinds of people:
-
-- **Root** logs in as `root@server` and can do everything.
-- **A person without projects** logs in with their own login and can only look around: processes, disk, load.
-- **A person with projects** gets **read** or **root on project** for each project.
+Root logs in as `root@server` and can do everything. Everyone else logs in with their own login. A person without projects can only look around: processes, disk, load. A person with projects gets **read** or **root on project** for each project.
 
 |  | no projects | read | root on project |
 |---|---|---|---|
