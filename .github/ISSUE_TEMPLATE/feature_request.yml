@@ -1,0 +1,21 @@
+name: Feature request
+description: An idea to make kilt better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: Describe your task. For example, "I want to give a contractor access for one week only."
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could kilt help?
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I can try to make a pull request

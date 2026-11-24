@@ -1,0 +1,4 @@
+{
+  "shop": {"compose": "shop-prod", "dir": "/srv/shop", "hide": ["notes-with-passwords.md"]},
+  "site": {"compose": "site", "dir": "/opt/site", "files": "ro"}
+}

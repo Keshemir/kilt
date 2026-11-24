@@ -1,0 +1,32 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to repeat
+      placeholder: |
+        1. kilt setup
+        2. Add a person with "read" on project shop
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: System
+      placeholder: Debian 13, Python 3.13, Docker 27, kilt from commit abc1234
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Error text or log
+      description: Output of the command and lines from /var/log/kilt.log. Remove keys, IP addresses and names you do not want to share.
+      render: text
