@@ -139,6 +139,7 @@ A timer runs `kilt sync` every 10 minutes to update permissions, keys and networ
 - New files can be read only after the next sync, up to 10 minutes later. This is on purpose.
 - If someone recreates containers without kilt, a container address can move to another project until the next sync.
 - Disk space is not limited.
+- The ban on listening ports needs systemd built with BPF. Debian has it. If your systemd does not, people can open ports above 1024, and `kilt setup` tells you so.
 - Users created without kilt are shown in the menu but not changed. Users in `sudo`, `docker`, `wheel`, `admin`, `lxd`, `libvirt` or `disk` are marked "same as root".
 - Removing someone's root key does not prove they are gone. They may have left another way in.
 

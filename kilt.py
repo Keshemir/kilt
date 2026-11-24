@@ -102,6 +102,10 @@ kilt runs as root and does not trust anything that a normal user can change.
         "Container commands are only for kilt personal accounts.",
     "kilt: непонятно, кто вызывает": "kilt: cannot find out who is running this",
     "kilt: окружение установлено": "kilt: installed",
+    "Внимание: systemd на этом сервере собран без BPF, поэтому запрет слушать порты не работает. "
+    "Личные учётки смогут открыть порт выше 1024.":
+        "Warning: systemd on this server is built without BPF, so the ban on listening ports does not work. "
+        "Personal accounts can open ports above 1024.",
     "kilt: создан {0} — проверь адрес сервера и папки с проектами":
         "kilt: created {0} — check the server address and the project folders",
     "root на проект": "root on project",
@@ -1877,6 +1881,11 @@ def sshd_config_with_block(old):
     return old[:start] + SSHD_BLOCK + (after[1:] if after.startswith("\n") else after)
 
 
+def bind_block_works():
+    # SocketBindDeny нужен systemd, собранный с BPF; без него systemd молча пропускает запрет
+    return "+BPF_FRAMEWORK" in run("systemctl", "--version", check=False)
+
+
 def setup():
     global CLOSED
     gid_of(GROUP_ALL)
@@ -1936,6 +1945,11 @@ def setup():
     run("systemctl", "enable", "kilt-sync.timer", "kilt-firewall.service")
     run("systemctl", "start", "kilt-sync.timer")
     boot()
+    if not bind_block_works():
+        warn = _("Внимание: systemd на этом сервере собран без BPF, поэтому запрет слушать порты не работает. "
+                 "Личные учётки смогут открыть порт выше 1024.")
+        log(warn)
+        print(warn)
     print(_("kilt: окружение установлено"))
 
 

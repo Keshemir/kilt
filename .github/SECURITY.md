@@ -27,6 +27,7 @@ These protections are for people with **read** access or with no projects. A per
 - **secrets in files with normal names.** kilt finds secrets by name (`.env`, `*.key`, `secret`, `token`, `.git/config`, folders like `secrets` or `.ssh`…). Add other files to the project's `hide` list.
 - **container addresses that move.** If containers are recreated without kilt, a container address can go to another project. kilt updates the network rules at the next sync (up to 10 minutes) and every time a person restarts a container with kilt.
 - **disk space.** There are no quotas.
+- **listening ports on systems where systemd is built without BPF.** kilt blocks listening ports with systemd's `SocketBindDeny`. Without BPF support in systemd this setting does nothing, so people can open ports above 1024. `kilt setup` warns about it.
 - **a new public address on the server** for up to 10 minutes. This happens only on kernels without `nft_fib_inet`, where kilt uses a list of addresses. Private networks are always blocked.
 - **the rest of the server.** kilt does not fix files that everyone can read outside the project folders, services without passwords, an old kernel, or users made without kilt.
 

@@ -315,8 +315,14 @@ def ports():
     rc, out = ssh("plain", "echo '* * * * * true' | crontab -")
     check("cron is blocked for personal accounts", None if "not found" in out else rc != 0, out)
     bind = "python3 -c \"import socket; s=socket.socket(); s.bind(('0.0.0.0', 3010)); s.listen(); print('BOUND')\""
-    rc, out = ssh("plain", bind)
-    check("ports: a personal account cannot open a port on the server", "BOUND" not in out.splitlines(), out)
+    version = run("systemctl", "--version", check=False).stdout
+    rc, out = ssh("plain", "grep -o 'user-[0-9]*.slice' /proc/self/cgroup; " + bind)
+    if "+BPF_FRAMEWORK" not in version:
+        check("ports: a personal account cannot open a port on the server", None,
+              "systemd is built without BPF_FRAMEWORK, kilt setup warns about it")
+    else:
+        check("ports: a personal account cannot open a port on the server", "BOUND" not in out.splitlines(),
+              out + " | " + version.splitlines()[0])
     rc, out = ssh("plain", "true", extra=("-o", "ExitOnForwardFailure=yes", "-R", "3011:127.0.0.1:22"))
     check("ports: ssh -R is not allowed", rc != 0, out)
 
