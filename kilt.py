@@ -4,8 +4,11 @@
   kilt            меню (от root): стрелки ↑↓, Enter, Esc — назад/выход
   kilt setup      установить или обновить окружение (sshd, sudo, таймер, фаервол); можно повторять
   kilt sync       пересчитать права на файлы, ключи и сеть (таймер, раз в 10 минут)
-  kilt boot       сетевые запреты и виды проектов при загрузке сервера (служба, до sshd)
+  kilt boot       базовые сетевые запреты и виды проектов при загрузке (служба kilt-boot, до sshd, без docker)
   kilt firewall   только сетевые правила
+  kilt uninstall [--remove-users] [--yes] [--purge]
+                  убрать kilt с сервера; --purge удаляет ещё /etc/kilt и журнал
+  kilt --version  версия kilt
   kilt ps | logs | restart | stop | start | exec …
                   контейнеры проекта; у личной учётки это тот же kilt через sudo (kilt help)
 
@@ -20,7 +23,7 @@
 запускается в изолированном режиме Python (-I), права на файлы ставит по открытым
 дескрипторам (без гонок с символическими ссылками), сеть режет по номеру пользователя.
 """
-import base64, datetime, errno, fcntl, fnmatch, grp, hashlib, ipaddress, json, os, pwd, re, resource
+import base64, datetime, errno, fcntl, fnmatch, glob, grp, hashlib, ipaddress, json, os, pwd, re, resource
 import secrets, shutil, signal, stat, struct, subprocess, sys, tempfile, termios, time
 
 
@@ -50,8 +53,11 @@ EN = {
   kilt            menu (run as root): arrows ↑↓, Enter, Esc — back / exit
   kilt setup      install or update kilt (sshd, sudo, timer, firewall); you can run it again
   kilt sync       update file permissions, keys and network rules (runs every 10 minutes)
-  kilt boot       network rules and project folders when the server starts (before sshd)
+  kilt boot       basic network rules and project folders at start (kilt-boot service, before sshd, without docker)
   kilt firewall   network rules only
+  kilt uninstall [--remove-users] [--yes] [--purge]
+                  remove kilt from this server; --purge also removes /etc/kilt and the log
+  kilt --version  show the kilt version
   kilt ps | logs | restart | stop | start | exec …
                   project containers; personal accounts use these commands too (through sudo), see kilt help
 
@@ -112,8 +118,8 @@ kilt runs as root and does not trust anything that a normal user can change.
     "root: ещё ключей не через это меню: {0} (с опциями или сертификаты)":
         "root: other keys not managed by this menu: {0} (keys with options, or certificates)",
     "ssh-keygen не признал эту строку ключом.": "ssh-keygen says this line is not a key.",
-    "sshd не принял новый блок настроек — возвращён прежний файл: {0}":
-        "sshd did not accept the new settings — the old file is back: {0}",
+    "sshd не принял новые настройки — прежние возвращены: {0}":
+        "sshd did not accept the new settings, so the old ones are back: {0}",
     "{0:<23} весь сервер, root   {1}…": "{0:<23} whole server, root   {1}…",
     "{0} (весь сервер, root)": "{0} (whole server, root)",
     "{0} (личная учётка)": "{0} (personal account)",
@@ -139,10 +145,10 @@ kilt runs as root and does not trust anything that a normal user can change.
     "{0}: новый ключ {1}": "{0}: new key {1}",
     "{0}: ожидается объект {{...}}": "{0}: must be an object {{...}}",
     "{0}: проект {1} → {2}": "{0}: project {1} → {2}",
-    "{0}: проект {1} — ожидается объект с полями compose (строка), dir (строка), hide (список строк), "
+    "{0}: проект {1} — ожидается объект с полями compose (строка), dir (строка), hide и exclude (списки строк), "
     "files (только \"ro\")":
-        "{0}: project {1} — must be an object with the fields compose (text), dir (text), hide (list of texts), "
-        "files (only \"ro\")",
+        "{0}: project {1} must be an object with the fields compose (text), dir (text), "
+        "hide and exclude (lists of texts), files (only \"ro\")",
     "{0}: адресов для проброса портов больше 300 ({1}) — проброс портов выключен":
         "{0}: more than 300 port forwarding targets ({1}), so port forwarding is off",
     "{0}: это не личная учётка kilt, kilt не трогает её процессы":
@@ -274,10 +280,42 @@ kilt runs as root and does not trust anything that a normal user can change.
     "файл не найден: {0}": "file not found: {0}",
     "✓ готово — дальше к ключу": "✓ done — next: the key",
     "➕ Добавить человека": "➕ Add a person",
+    "kilt сейчас занят другой работой, попробуй через минуту": "kilt is busy, try again in a minute",
+    "{0}: нет ответа за {1} с, команда остановлена": "{0}: no answer in {1} seconds, the command was stopped",
+    "фаервол kilt не загружен: nft list table inet kilt не находит таблицу":
+        "the kilt firewall is not loaded: nft list table inet kilt cannot find the table",
+    "sync: {0} с, объектов: {1}, изменено: {2}, ошибок: {3}":
+        "sync: {0} s, files and folders seen: {1}, changed: {2}, errors: {3}",
+    "subuid и subgid: {0}": "subuid and subgid: {0}",
+    "{0}: снят setuid/setgid с файлов: {1}": "{0}: setuid/setgid removed from {1} files",
+    "ВНИМАНИЕ: {0}: не все файлы проверены на setuid/setgid, ошибок: {1}":
+        "WARNING: {0}: not all files were checked for setuid/setgid, errors: {1}",
+    "проекты не загружены: {0}": "could not load the projects: {0}",
+    "Внимание: в sshd задано {0}, и личные учётки kilt (группа {1}) не смогут войти. "
+    "kilt это не меняет: поправь настройки sshd сам.":
+        "Warning: sshd has {0}, so kilt personal accounts (group {1}) cannot log in. "
+        "kilt does not change this. Please fix the sshd settings yourself.",
+    "на сервере есть личные учётки kilt: {0}. Удали их в меню или запусти kilt uninstall --remove-users":
+        "there are kilt personal accounts on this server: {0}. Delete them in the menu, "
+        "or run kilt uninstall --remove-users",
+    "Будут удалены личные учётки: {0}": "These personal accounts will be deleted: {0}",
+    "Убрать kilt с этого сервера? Введи yes, чтобы продолжить: ": "Remove kilt from this server? Type yes to continue: ",
+    "личная учётка {0}": "personal account {0}",
+    "{0}: там ещё что-то примонтировано, папка не удалена": "{0}: something is still mounted there, so the folder stays",
+    "записи kilt в правах на файлы: {0}": "kilt entries in file permissions: {0}",
+    "группа {0}": "group {0}",
+    "группу {0} удалить не удалось": "could not delete the group {0}",
+    "блок kilt в настройках sshd": "the kilt block in the sshd settings",
+    "kilt убран с сервера:": "kilt is removed from this server:",
+    "Ключи root в {0} не тронуты. Сам kilt лежит в {1}, удали его сам: rm {1}":
+        "Root keys in {0} are not changed. kilt itself is still in {1}. To remove it: rm {1}",
+    "Настройки в {0} и журнал {1} оставлены: их удаляет kilt uninstall --purge":
+        "The settings in {0} and the log {1} are kept. kilt uninstall --purge removes them too.",
 }
 
 
 # ---------------------------------------------------------------- настройки
+VERSION = "0.2.0"
 HOST = ""
 DEFAULT_CLOSED = ("/opt", "/srv")
 CLOSED = list(DEFAULT_CLOSED)
@@ -297,21 +335,26 @@ STATE = ETC + "/state.json"
 KEYS_DIR = ETC + "/keys"
 LOCK = "/run/kilt.lock"
 VIEW = "/run/kilt/view"
+BIN = "/usr/local/bin/kilt"
+LOGROTATE = "/etc/logrotate.d/kilt"
 GROUP_ALL = "kilt"
 UID_MIN, UID_MAX = 70000, 79999
 GID_MIN, GID_MAX = 80000, 89999
 ROOT_GROUPS = ("sudo", "wheel", "admin", "docker", "lxd", "libvirt", "disk")
 RESERVED = {"root", "kilt", "adm", "staff", "nobody", *ROOT_GROUPS}
-SECRET_RE = re.compile(r"((^|[._-])env($|[._-])|\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|\.keystore$"
-                       r"|^id_(rsa|ed25519|ecdsa)|credential|secret|passw|token)", re.I)
+SECRET_RE = re.compile(r"((^|[._-])env($|[._-])|\.pem$|\.key$|\.p12$|\.pfx$|\.jks$|\.keystore$|\.tfstate(\.backup)?$"
+                       r"|^(acme\.json|\.pgpass|\.netrc|\.npmrc|\.envrc)$|^id_(rsa|ed25519|ecdsa)|credential|secret|passw|token)",
+                       re.I)
 NOT_SECRET_RE = re.compile(r"\.(example|sample|template)$", re.I)
-VENDORED = {"node_modules", ".git", "site-packages", "vendor", ".venv", "venv"}
+VENDORED = {"node_modules", "site-packages", "vendor", ".venv", "venv"}
+PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
 KEY_RE = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)"
                     r"|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)\s+([A-Za-z0-9+/=]+)(\s+.*)?$")
 ANYKEY_RE = re.compile(r"(ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-nistp\d+|sk-\S+)\s+([A-Za-z0-9+/=]+)(\s+.*)?$")
 LOGIN_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 P_LEVEL = {"read": _("чтение"), "rw": _("root на проект")}
 LIMITS = "[Slice]\nTasksMax=256\nMemoryHigh=768M\nMemoryMax=1G\nMemorySwapMax=0\nCPUQuota=100%\nSocketBindDeny=any\n"
+NO_TABLE = _("фаервол kilt не загружен: nft list table inet kilt не находит таблицу")
 RW_WARNING = (_("«root на проект» — это полное доверие: человек меняет файлы проекта и заходит в его "
               "контейнеры, а оттуда при желании и умении может получить root на всём сервере."))
 
@@ -326,11 +369,17 @@ def missing(prog):
     return _("не найдена программа {0}").format(clean(prog, 60)) + (_(" — установи: {0}").format(hint) if hint else "")
 
 
-def run(*cmd, check=True, **kw):
+def timed_out(cmd, seconds):
+    return _("{0}: нет ответа за {1} с, команда остановлена").format(clean(" ".join(cmd), 80), seconds)
+
+
+def run(*cmd, check=True, timeout=60, **kw):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
     except FileNotFoundError:
         raise RuntimeError(missing(cmd[0]))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(timed_out(cmd, timeout)) from None
     if check and r.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd)}: {(r.stderr or r.stdout).strip()}")
     return r.stdout
@@ -350,15 +399,50 @@ def log(msg):
         pass
 
 
-_lock_depth, _lock_fd = 0, None
+_lock_depth, _lock_fd, _lock_signals = 0, None, {}
+LOCK_QUIET = False
+QUIET_SIGNALS = (signal.SIGTSTP, signal.SIGTTIN, signal.SIGTTOU, signal.SIGINT, signal.SIGHUP)
+
+
+class Busy(RuntimeError):
+    pass
+
+
+def _restore_signals():
+    global _lock_signals
+    for s, h in _lock_signals.items():
+        signal.signal(s, signal.SIG_DFL if h is None else h)
+    _lock_signals = {}
 
 
 class lock:
+    def __init__(self, wait=60):
+        self.wait = wait
+
     def __enter__(self):
-        global _lock_depth, _lock_fd
+        global _lock_depth, _lock_fd, _lock_signals
         if _lock_depth == 0:
-            _lock_fd = os.open(LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-            fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+            # Личная учётка (sudo kilt …) не должна остановить kilt с замком в руках: Ctrl+Z, обрыв связи и Ctrl+C не действуют.
+            if LOCK_QUIET:
+                _lock_signals = {s: signal.signal(s, signal.SIG_IGN) for s in QUIET_SIGNALS}
+            fd = None
+            try:
+                fd = os.open(LOCK, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                end = time.monotonic() + self.wait
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= end:
+                            raise Busy(_("kilt сейчас занят другой работой, попробуй через минуту")) from None
+                        time.sleep(0.2)
+            except BaseException:
+                if fd is not None:
+                    os.close(fd)
+                _restore_signals()
+                raise
+            _lock_fd = fd
         _lock_depth += 1
 
     def __exit__(self, *a):
@@ -366,6 +450,7 @@ class lock:
         _lock_depth -= 1
         if _lock_depth == 0:
             os.close(_lock_fd)
+            _restore_signals()
 
 
 def load_json(path, default):
@@ -516,21 +601,33 @@ def acl_apply(fd, st, want, default=False):
     name = ACL_DEFAULT if default else ACL_ACCESS
     cur = _acl_get(fd, name)
     if not cur:
+        if all(p is None for p in want.values()):
+            return False
         base = (_acl_get(fd, ACL_ACCESS) if default else None) or _acl_from_mode(st.st_mode)
         cur_cmp, d = None, {(t, i): p for t, p, i in base if t in (T_USER_OBJ, T_GROUP_OBJ, T_OTHER)}
     else:
         cur_cmp, d = cur, {(t, i): p for t, p, i in cur}
     for gid, perm in want.items():
-        d[(T_GROUP, gid)] = perm
-    mask = 0
-    for (t, _q), p in d.items():
-        if t in (T_USER, T_GROUP_OBJ, T_GROUP):
-            mask |= p
-    d[(T_MASK, UNDEF)] = mask
+        if perm is None:
+            d.pop((T_GROUP, gid), None)
+        else:
+            d[(T_GROUP, gid)] = perm
+    named = any(t in (T_USER, T_GROUP) for t, _q in d)
+    if named:
+        mask = 0
+        for (t, _q), p in d.items():
+            if t in (T_USER, T_GROUP_OBJ, T_GROUP):
+                mask |= p
+        d[(T_MASK, UNDEF)] = mask
+    elif (T_MASK, UNDEF) in d:
+        d[(T_GROUP_OBJ, UNDEF)] = d.get((T_GROUP_OBJ, UNDEF), 0) & d.pop((T_MASK, UNDEF))
     order = lambda e: (e[0], e[2])
     new = sorted(((t, p, i) for (t, i), p in d.items()), key=order)
     if cur_cmp is not None and sorted(cur_cmp, key=order) == new:
         return False
+    if default and not named:
+        os.removexattr(f"/proc/self/fd/{fd}", name)
+        return True
     blob = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", t, p, i) for t, p, i in new)
     os.setxattr(f"/proc/self/fd/{fd}", name, blob)
     return True
@@ -561,8 +658,9 @@ def acl_path(path, want):
         os.close(fd)
 
 
-def acl_tree(path, gid_r, gid_w, hide, files_ro=False, skip=()):
-    """Чтение: r-X без секретов. Root на проект: rwX, секреты только читать, в .git не писать (git-хуки)."""
+def acl_tree(path, gid_r, gid_w, hide, files_ro=False, skip=(), exclude=(), clear=None):
+    """Чтение: r-X без секретов. Root на проект: rwX, секреты только читать, в .git не писать (git-хуки).
+    Файлы только для владельца (600, 700) и exclude — без записей kilt; clear — только убрать записи этих групп."""
     rootfd = open_nofollow(path)
     dev = os.fstat(rootfd).st_dev
     res = {"seen": 0, "changed": 0, "errors": 0}
@@ -574,28 +672,35 @@ def acl_tree(path, gid_r, gid_w, hide, files_ro=False, skip=()):
         except OSError:
             pass
 
-    def hidden(rel, name):
-        return any(name == h or rel == h or fnmatch.fnmatch(rel, h) for h in hide)
+    def listed(rel, name, patterns):
+        return any(name == h or rel == h or fnmatch.fnmatch(rel, h) for h in patterns)
 
-    def visit(fd, rel, st, in_git, vendored, in_secret):
+    def visit(fd, rel, st, in_git, in_secret):
         is_dir = stat.S_ISDIR(st.st_mode)
         parts = rel.split("/")
         name = parts[-1]
         secret = in_secret or (not is_dir and name == "config" and ".git" in parts[:-1]) \
             or (is_dir and name == ".ssh") \
-            or (not vendored and bool(SECRET_RE.search(name)) and not NOT_SECRET_RE.search(name))
-        x = 1 if (is_dir or st.st_mode & 0o111) else 0
-        pr = 0 if (secret or (rel and hidden(rel, name))) else 4 | x
-        pw = 4 if (secret and not is_dir) else (4 | x if (in_git or files_ro) else 6 | x)
+            or (not in_git and bool(SECRET_RE.search(name)) and not NOT_SECRET_RE.search(name))
+        excluded = bool(rel) and listed(rel, name, exclude)
         res["seen"] += 1
+        if clear is not None:
+            want = dwant = dict.fromkeys(clear)
+        elif excluded or (rel and not st.st_mode & 0o077):
+            want = dwant = {gid_r: None, gid_w: None}
+        else:
+            x = 1 if (is_dir or st.st_mode & 0o111) else 0
+            pr = 0 if (secret or (rel and listed(rel, name, hide))) else 4 | x
+            pw = 4 if (secret and not is_dir) else (4 | x if (in_git or files_ro) else 6 | x)
+            want, dwant = {gid_r: pr, gid_w: pw}, {gid_r: 1 if pr else 0, gid_w: pw}
         try:
-            ch = acl_apply(fd, st, {gid_r: pr, gid_w: pw})
+            ch = acl_apply(fd, st, want)
             if is_dir:
-                ch |= acl_apply(fd, st, {gid_r: 1 if pr else 0, gid_w: pw}, default=True)
+                ch |= acl_apply(fd, st, dwant, default=True)
             res["changed"] += ch
         except OSError:
             res["errors"] += 1
-        if not is_dir:
+        if not is_dir or (clear is None and (excluded or (rel and name in VENDORED))):
             return
         try:
             dfd = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -621,7 +726,7 @@ def acl_tree(path, gid_r, gid_w, hide, files_ro=False, skip=()):
                         except OSError:
                             res["errors"] += 1
                         continue
-                    visit(cfd, f"{rel}/{n}" if rel else n, cst, in_git or n == ".git", vendored or n in VENDORED, secret)
+                    visit(cfd, f"{rel}/{n}" if rel else n, cst, in_git or n == ".git", secret)
                 except RecursionError:
                     res["errors"] += 1
                 finally:
@@ -630,7 +735,7 @@ def acl_tree(path, gid_r, gid_w, hide, files_ro=False, skip=()):
             os.close(dfd)
 
     try:
-        visit(rootfd, "", os.fstat(rootfd), False, False, False)
+        visit(rootfd, "", os.fstat(rootfd), False, False)
     finally:
         os.close(rootfd)
     return res
@@ -661,9 +766,11 @@ def key_info(line):
     except Exception:
         return None, _("Ключ повреждён: скопирован не целиком или с лишними символами.")
     try:
-        r = subprocess.run(["ssh-keygen", "-l", "-f", "-"], input=key + "\n", capture_output=True, text=True)
+        r = subprocess.run(["ssh-keygen", "-l", "-f", "-"], input=key + "\n", capture_output=True, text=True, timeout=30)
     except FileNotFoundError:
         return None, missing("ssh-keygen")
+    except subprocess.TimeoutExpired:
+        return None, timed_out(["ssh-keygen", "-l"], 30)
     if r.returncode:
         return None, _("ssh-keygen не признал эту строку ключом.")
     return key, "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
@@ -748,40 +855,47 @@ def safe_dir(d):
 
 def load_projects_conf():
     conf = load_root_json(CONF) or {}
+    texts = lambda x: isinstance(x, list) and all(isinstance(h, str) for h in x)
     for k, v in conf.items():
         if not isinstance(v, dict) or any(f in v and not isinstance(v[f], str) for f in ("compose", "dir")) \
-                or not (isinstance(v.get("hide", []), list) and all(isinstance(h, str) for h in v.get("hide", []))) \
-                or v.get("files", "ro") != "ro":
+                or not texts(v.get("hide", [])) or not texts(v.get("exclude", [])) or v.get("files", "ro") != "ro":
             raise RuntimeError(_("{0}: проект {1} — ожидается объект с полями compose (строка), dir (строка), "
-                                 "hide (список строк), files (только \"ro\")").format(CONF, clean(k, 40)))
+                                 "hide и exclude (списки строк), files (только \"ro\")").format(CONF, clean(k, 40)))
     return conf
 
 
+def valid_name(name):
+    return bool(PROJECT_RE.fullmatch(name)) and not name.endswith("-rw")
+
+
+def auto_name(comp, conf):
+    """Имя зависит только от имени в compose, не от порядка docker ps: иначе доступ мог бы уйти к другому проекту."""
+    if valid_name(comp) and comp not in conf:
+        return comp
+    base = re.sub(r"[^a-z0-9-]", "-", comp.lower()).strip("-")[:18].strip("-")
+    return (base + "-" if base else "") + hashlib.sha1(comp.encode("utf-8", "surrogateescape")).hexdigest()[:5]
+
+
 def projects():
-    conf = {k: v for k, v in load_projects_conf().items()
-            if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,23}", k) and not k.endswith("-rw")}
+    conf = {k: v for k, v in load_projects_conf().items() if valid_name(k)}
     by_compose = {(v.get("compose") or k): k for k, v in conf.items()}
     fmt = '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}|' \
           '{{.Label "com.docker.compose.service"}}|{{.Names}}|{{.ID}}'
-    out = {}
+    found = {}
     for line in run("docker", "ps", "-a", "--format", fmt).splitlines():
         comp, wd, svc, cname, cid = (line.split("|") + [""] * 5)[:5]
-        if not comp:
+        if comp:
+            found.setdefault(comp, []).append((wd, svc, cname, cid))
+    out = {}
+    for comp in sorted(found):
+        name = by_compose.get(comp) or auto_name(comp, conf)
+        if name in out or (name in conf and by_compose.get(comp) != name):
             continue
-        name = by_compose.get(comp)
-        if not name:
-            name = re.sub(r"[^a-z0-9-]", "-", comp.lower()).strip("-")[:24]
-            if name.endswith("-rw"):
-                name += "-p"
-            if not name:
-                continue
-            if name in conf or (name in out and out[name]["compose"] != comp):
-                name = name[:18] + "-" + hashlib.sha1(comp.encode()).hexdigest()[:5]
-        p = out.setdefault(name, {"compose": comp, "dir": conf.get(name, {}).get("dir") or wd, "services": {}, "ids": []})
-        if p["compose"] != comp:
-            continue
-        p["services"].setdefault(svc, []).append(cname)
-        p["ids"].append(cid)
+        p = out[name] = {"compose": comp, "dir": conf.get(name, {}).get("dir") or found[comp][0][0],
+                         "services": {}, "ids": []}
+        for _wd, svc, cname, cid in found[comp]:
+            p["services"].setdefault(svc, []).append(cname)
+            p["ids"].append(cid)
     for name, v in conf.items():
         if name not in out and v.get("dir"):
             out[name] = {"compose": v.get("compose") or name, "dir": v["dir"], "services": {}, "ids": []}
@@ -792,6 +906,7 @@ def projects():
             continue
         out[name]["dir"] = d
         out[name]["hide"] = list(conf.get(name, {}).get("hide", []))
+        out[name]["exclude"] = list(conf.get(name, {}).get("exclude", []))
         out[name]["files_ro"] = conf.get(name, {}).get("files") == "ro"
     return out
 
@@ -853,7 +968,7 @@ def apply_acl(name, p, skip=()):
     for part in os.path.relpath(d, root).split("/"):
         acl_path(cur, {g_r: 0, g_w: 0})
         cur = os.path.join(cur, part)
-    return acl_tree(d, g_r, g_w, p.get("hide") or [], p.get("files_ro", False), skip)
+    return acl_tree(d, g_r, g_w, p.get("hide") or [], p.get("files_ro", False), skip, p.get("exclude") or [])
 
 
 def view_path(name):
@@ -1031,7 +1146,6 @@ def user_file(login, name, text):
 def link_projects(login, mine):
     pw = pwd.getpwnam(login)
     home = pw.pw_dir
-    user_file(login, ".gitconfig", "[safe]\n\tdirectory = *\n")
     try:
         names = os.listdir(home)
     except OSError:
@@ -1081,6 +1195,96 @@ def kill_user(login):
     return False
 
 
+def strip_setid(login):
+    """Снять setuid/setgid с файлов человека: через такой файл он сохранил бы группу проекта и после того, как её забрали."""
+    pw = pwd.getpwnam(login)
+    uid = pw.pw_uid
+    if not UID_MIN <= uid <= UID_MAX:
+        raise RuntimeError(_("{0}: это не личная учётка kilt, kilt не трогает её процессы").format(login))
+    try:
+        _soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (ValueError, OSError):
+        pass
+    done = errors = 0
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    for top in (pw.pw_dir, "/tmp", "/var/tmp", "/dev/shm"):
+        try:
+            pfd = open_nofollow(top)
+        except (OSError, RuntimeError):
+            continue
+        try:
+            fd = os.open(f"/proc/self/fd/{pfd}", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except OSError:
+            errors += 1
+            continue
+        finally:
+            os.close(pfd)
+        stack = [(fd, [])]
+        try:
+            dev = os.fstat(fd).st_dev
+            stack[0][1].extend(os.listdir(fd))
+            while stack:
+                dfd, names = stack[-1]
+                if not names:
+                    os.close(stack.pop()[0])
+                    continue
+                n = names.pop()
+                try:
+                    st = os.stat(n, dir_fd=dfd, follow_symlinks=False)
+                    if st.st_dev != dev:
+                        continue
+                    if stat.S_ISDIR(st.st_mode):
+                        cfd = os.open(n, flags | os.O_DIRECTORY, dir_fd=dfd)
+                        try:
+                            if os.fstat(cfd).st_dev == dev:
+                                stack.append((cfd, os.listdir(cfd)))
+                                cfd = None
+                        finally:
+                            if cfd is not None:
+                                os.close(cfd)
+                    elif stat.S_ISREG(st.st_mode) and st.st_uid == uid and st.st_mode & 0o6000:
+                        ffd = os.open(n, flags | os.O_NONBLOCK, dir_fd=dfd)
+                        try:
+                            fst = os.fstat(ffd)
+                            if stat.S_ISREG(fst.st_mode) and fst.st_uid == uid and fst.st_mode & 0o6000:
+                                os.fchmod(ffd, stat.S_IMODE(fst.st_mode) & ~0o6000)
+                                done += 1
+                        finally:
+                            os.close(ffd)
+                except OSError as e:
+                    if e.errno != errno.ENOENT:
+                        errors += 1
+        except OSError:
+            errors += 1
+        finally:
+            for dfd, _names in stack:
+                os.close(dfd)
+    if done:
+        log(_("{0}: снят setuid/setgid с файлов: {1}").format(login, done))
+    if errors:
+        log(_("ВНИМАНИЕ: {0}: не все файлы проверены на setuid/setgid, ошибок: {1}").format(login, errors))
+    return errors == 0
+
+
+def kilt_name(name):
+    return (name.isdigit() and UID_MIN <= int(name) <= UID_MAX) or kilt_uid(name) is not None
+
+
+def drop_subids():
+    """Диапазоны в /etc/subuid и /etc/subgid дают сбросить группу kilt в user namespace и обойти запрет на корни проектов."""
+    for path in ("/etc/subuid", "/etc/subgid"):
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+                lines = f.read().splitlines()
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            continue
+        keep = [l for l in lines if not kilt_name(l.split(":", 1)[0].strip())]
+        if keep != lines:
+            write_root_file(path, "".join(l + "\n" for l in keep), mode)
+
+
 def edit_lines(path, add=None, remove=None):
     lines = []
     try:
@@ -1105,11 +1309,13 @@ def create_user(login, key):
         raise
     run("usermod", "-p", "*", login)
     os.chmod(pwd.getpwnam(login).pw_dir, 0o700)
+    drop_subids()
     edit_lines("/etc/cron.deny", add=login)
+    edit_lines("/etc/at.deny", add=login)
     d = f"/etc/systemd/system/user-{uid}.slice.d"
     os.makedirs(d, exist_ok=True)
     write_root_file(d + "/50-kilt.conf", LIMITS, 0o644)
-    run("systemctl", "daemon-reload", check=False)
+    run("systemctl", "daemon-reload", check=False, timeout=120)
     user_file(login, ".bash_profile",
               _('[ -f ~/.bashrc ] && . ~/.bashrc\n'
                 'echo; echo "Твои проекты: $(for f in ~/*; do case "$(readlink "$f")" in (/run/kilt/view/*) '
@@ -1121,20 +1327,31 @@ def create_user(login, key):
 def set_project(login, name, level, allp):
     gr, grw = groups_of(name)
     with lock():
-        if level:
-            apply_acl(name, allp[name], other_dirs(allp, name))
-            ensure_view(name, allp[name])
-            run("usermod", "-aG", gr, login)
-            if level == "rw":
-                run("usermod", "-aG", grw, login)
+        old = user_projects(login, allp).get(name)
+        lose = bool(old) and (not level or (old == "rw" and level == "read"))
+        if lose:
+            # Пока снимаем setuid/setgid, вход закрыт: иначе новый процесс успел бы сохранить себе группу проекта.
+            run("usermod", "-e", "1", login)
+        try:
+            if level:
+                apply_acl(name, allp[name], other_dirs(allp, name))
+                ensure_view(name, allp[name])
+                run("usermod", "-aG", gr, login)
+                if level == "rw":
+                    run("usermod", "-aG", grw, login)
+                else:
+                    run("gpasswd", "-d", login, grw, check=False)
             else:
+                run("gpasswd", "-d", login, gr, check=False)
                 run("gpasswd", "-d", login, grw, check=False)
-        else:
-            run("gpasswd", "-d", login, gr, check=False)
-            run("gpasswd", "-d", login, grw, check=False)
-        refresh(allp, only=login)
-        if not kill_user(login):
-            log(_("ВНИМАНИЕ: не удалось завершить все процессы {0}").format(login))
+            refresh(allp, only=login)
+            if not kill_user(login):
+                log(_("ВНИМАНИЕ: не удалось завершить все процессы {0}").format(login))
+            if lose:
+                strip_setid(login)
+        finally:
+            if lose:
+                run("usermod", "-e", "", login, check=False)
     log(_("{0}: проект {1} → {2}").format(login, name, P_LEVEL[level] if level else _("нет доступа")))
 
 
@@ -1150,13 +1367,14 @@ def delete_user(login):
             os.remove(key_file(login))
         run("usermod", "-e", "1", login, check=False)
         kill_user(login)
+        strip_setid(login)
         run("crontab", "-r", "-u", login, check=False)
         for leftover in (f"/var/spool/cron/crontabs/{login}", f"/var/mail/{login}"):
             if os.path.lexists(leftover):
                 os.remove(leftover)
         run("loginctl", "disable-linger", login, check=False)
         kill_user(login)
-        run("userdel", "-r", login, check=False)
+        run("userdel", "-r", login, check=False, timeout=600)
         try:
             pwd.getpwnam(login)
         except KeyError:
@@ -1165,10 +1383,11 @@ def delete_user(login):
             raise RuntimeError(_("учётку {0} удалить не удалось — вход закрыт, но запись осталась, проверь вручную").format(login))
         run("groupdel", login, check=False)
         edit_lines("/etc/cron.deny", remove=login)
+        edit_lines("/etc/at.deny", remove=login)
         shutil.rmtree(f"/etc/systemd/system/user-{uid}.slice.d", ignore_errors=True)
-        run("systemctl", "daemon-reload", check=False)
+        run("systemctl", "daemon-reload", check=False, timeout=120)
         for tmp in ("/tmp", "/var/tmp", "/dev/shm"):
-            run("find", tmp, "-xdev", "-uid", str(uid), "-delete", check=False)
+            run("find", tmp, "-xdev", "-uid", str(uid), "-delete", check=False, timeout=600)
         firewall()
     log(_("{0}: удалён").format(login))
 
@@ -1192,8 +1411,116 @@ def dns_servers():
     return v4, v6
 
 
+PRIVATE_NETS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10",
+                "fc00::/7", "fe80::/10", "64:ff9b::/96")
+
+
+def nft_rules(allow_ip=(), allow_port=(), allow_hostport=(), deny=(), local=None):
+    el = lambda s: f" elements = {{ {', '.join(sorted(s))} }}" if s else ""
+    nets = [ipaddress.ip_network(n) for n in PRIVATE_NETS] + list(deny)
+    deny4, deny6 = (", ".join(map(str, ipaddress.collapse_addresses(n for n in nets if n.version == v))) for v in (4, 6))
+    dns4, dns6 = dns_servers()
+    dns = "\n".join(f"        {fam} daddr {{ {', '.join(sorted(s))} }} meta l4proto {{ tcp, udp }} th dport 53 accept"
+                    for fam, s in (("ip", dns4), ("ip6", dns6)) if s)
+    if local is None:
+        sets, to_local = "", ["fib daddr type local"]
+    else:
+        sets = (f"    set local4 {{ type ipv4_addr; flags interval;{el(local[0])} }}\n"
+                f"    set local6 {{ type ipv6_addr; flags interval;{el(local[1])} }}\n")
+        to_local = ["ip daddr @local4", "ip6 daddr @local6"]
+    host = "\n".join(f"        {m} meta skuid . tcp dport @allow_port accept" for m in to_local)
+    deny_local = "\n".join(f"        {m} jump deny" for m in to_local)
+    return f"""table inet kilt {{}}
+delete table inet kilt
+table inet kilt {{
+    set allow_ip {{ typeof meta skuid . ip daddr;{el(allow_ip)} }}
+    set allow_port {{ typeof meta skuid . tcp dport;{el(allow_port)} }}
+    set allow_hostport {{ typeof meta skuid . ip daddr . tcp dport;{el(allow_hostport)} }}
+{sets}    chain output {{
+        type filter hook output priority 0; policy accept;
+        meta skuid {UID_MIN}-{UID_MAX} jump restricted
+    }}
+    chain restricted {{
+        meta skuid . ip daddr @allow_ip accept
+        meta skuid . ip daddr . tcp dport @allow_hostport accept
+{host}
+{dns}
+{deny_local}
+        ip daddr {{ {deny4} }} jump deny
+        ip6 daddr {{ {deny6} }} jump deny
+    }}
+    chain deny {{
+        counter
+        meta l4proto tcp reject with tcp reset
+        reject with icmpx admin-prohibited
+    }}
+}}
+"""
+
+
+def nft_load(rules):
+    try:
+        return subprocess.run(["nft", "-f", "-"], input=rules, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise RuntimeError(missing("nft"))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(timed_out(["nft", "-f", "-"], 60)) from None
+
+
+def load_rules(**kw):
+    """Одна транзакция nft: старая таблица kilt заменяется новой целиком, без момента, когда правил нет."""
+    r = nft_load(nft_rules(**kw))
+    if r.returncode and "fib" in r.stderr:
+        nets = [ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")]
+        for link in json.loads(run("ip", "-j", "addr", "show") or "[]"):
+            for a in link.get("addr_info") or []:
+                try:
+                    nets.append(ipaddress.ip_network(a.get("local") or ""))
+                except ValueError:
+                    pass
+        local = [{str(n) for n in ipaddress.collapse_addresses(n for n in nets if n.version == v)} for v in (4, 6)]
+        r = nft_load(nft_rules(local=local, **kw))
+        if not r.returncode and not load_json(STATE, {}).get("fib_warned"):
+            log(_("фаервол: в ядре нет nft_fib_inet — адреса сервера взяты списком, новые появятся после синхронизации"))
+            try:
+                state_set(fib_warned=True)
+            except OSError:
+                pass
+    if r.returncode:
+        raise RuntimeError(f"nft: {clean(r.stderr.strip(), 400)}")
+
+
+def firewall_base():
+    """Одни запреты, без настроек и без docker: так сеть закрыта, даже если всё остальное сломалось."""
+    load_rules()
+
+
+def table_loaded():
+    try:
+        run("nft", "list", "table", "inet", "kilt", timeout=30)
+        return True
+    except RuntimeError:
+        return False
+
+
+def docker_subnets():
+    ids = run("docker", "network", "ls", "-q").split()
+    try:
+        data = json.loads(run("docker", "network", "inspect", *ids, check=False) or "[]") if ids else []
+    except ValueError:
+        data = []
+    nets = set()
+    for n in data if isinstance(data, list) else []:
+        for c in ((n.get("IPAM") or {}).get("Config") or []) if isinstance(n, dict) else []:
+            try:
+                nets.add(ipaddress.ip_network((c or {}).get("Subnet") or "", strict=False))
+            except (ValueError, AttributeError):
+                pass
+    return nets
+
+
 def firewall(allp=None):
-    ip_el, port_el, hostport_el = set(), set(), set()
+    ip_el, port_el, hostport_el, deny = set(), set(), set(), set()
     try:
         allp = allp if allp is not None else projects()
         for u in accounts():
@@ -1204,76 +1531,18 @@ def firewall(allp=None):
                     ip_el |= {f"{uid} . {ip}" for ip in ips}
                     port_el |= {f"{uid} . {p}" for p in ports}
                     hostport_el |= {f"{uid} . {h.replace(':', ' . ')}" for h in hostports}
+        deny = docker_subnets()
     except Exception as e:
         log(_("фаервол: исключения не посчитаны ({0}), действуют одни запреты").format(clean(e, 120)))
-        ip_el, port_el, hostport_el = set(), set(), set()
-    el = lambda s: f" elements = {{ {', '.join(sorted(s))} }}" if s else ""
-    dns4, dns6 = dns_servers()
-    dns = "\n".join(f"        {fam} daddr {{ {', '.join(sorted(s))} }} meta l4proto {{ tcp, udp }} th dport 53 accept"
-                    for fam, s in (("ip", dns4), ("ip6", dns6)) if s)
-
-    def ruleset(local4=None, local6=None):
-        if local4 is None:
-            sets, to_host, to_deny = "", ["fib daddr type local"], ["fib daddr type local"]
-        else:
-            sets = (f"    set local4 {{ type ipv4_addr; flags interval;{el(local4)} }}\n"
-                    f"    set local6 {{ type ipv6_addr; flags interval;{el(local6)} }}\n")
-            to_host = to_deny = ["ip daddr @local4", "ip6 daddr @local6"]
-        host = "\n".join(f"        {m} meta skuid . tcp dport @allow_port accept" for m in to_host)
-        deny = "\n".join(f"        {m} jump deny" for m in to_deny)
-        return f"""table inet kilt {{}}
-delete table inet kilt
-table inet kilt {{
-    set allow_ip {{ typeof meta skuid . ip daddr;{el(ip_el)} }}
-    set allow_port {{ typeof meta skuid . tcp dport;{el(port_el)} }}
-    set allow_hostport {{ typeof meta skuid . ip daddr . tcp dport;{el(hostport_el)} }}
-{sets}    chain output {{
-        type filter hook output priority 0; policy accept;
-        meta skuid {UID_MIN}-{UID_MAX} jump restricted
-    }}
-    chain restricted {{
-        meta skuid . ip daddr @allow_ip accept
-        meta skuid . ip daddr . tcp dport @allow_hostport accept
-{host}
-{dns}
-{deny}
-        ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10 }} jump deny
-        ip6 daddr {{ fc00::/7, fe80::/10 }} jump deny
-    }}
-    chain deny {{
-        counter
-        meta l4proto tcp reject with tcp reset
-        reject with icmpx admin-prohibited
-    }}
-}}
-"""
-
-    def nft(rules):
+        ip_el, port_el, hostport_el, deny = set(), set(), set(), set()
+    try:
+        load_rules(allow_ip=ip_el, allow_port=port_el, allow_hostport=hostport_el, deny=deny)
+    except RuntimeError:
         try:
-            return subprocess.run(["nft", "-f", "-"], input=rules, capture_output=True, text=True)
-        except FileNotFoundError:
-            raise RuntimeError(missing("nft"))
-
-    r = nft(ruleset())
-    if r.returncode and "fib" in r.stderr:
-        nets = [ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")]
-        for link in json.loads(run("ip", "-j", "addr", "show") or "[]"):
-            for a in link.get("addr_info") or []:
-                try:
-                    nets.append(ipaddress.ip_network(a.get("local") or ""))
-                except ValueError:
-                    pass
-        local4 = {str(n) for n in ipaddress.collapse_addresses(n for n in nets if n.version == 4)}
-        local6 = {str(n) for n in ipaddress.collapse_addresses(n for n in nets if n.version == 6)}
-        r = nft(ruleset(local4, local6))
-        if not r.returncode and not load_json(STATE, {}).get("fib_warned"):
-            log(_("фаервол: в ядре нет nft_fib_inet — адреса сервера взяты списком, новые появятся после синхронизации"))
-            try:
-                state_set(fib_warned=True)
-            except OSError:
-                pass
-    if r.returncode:
-        raise RuntimeError(f"nft: {r.stderr.strip()}")
+            firewall_base()
+        except RuntimeError:
+            pass
+        raise
 
 
 def refresh(allp=None, only=None):
@@ -1289,13 +1558,13 @@ def refresh(allp=None, only=None):
 
 
 def sync():
-    errors = []
+    errors, total, started = [], {"seen": 0, "changed": 0, "errors": 0}, time.monotonic()
     try:
         _soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     except (ValueError, OSError):
         pass
-    with lock():
+    with lock(300):
         try:
             ensure_closed()
             allp = projects()
@@ -1303,10 +1572,14 @@ def sync():
             log(f"sync: {clean(e)}")
             print(f"kilt sync: {clean(e)}", file=sys.stderr)
             try:
-                firewall({})
-            except Exception:
-                pass
+                firewall_base()
+            except Exception as e2:
+                log(f"sync: {clean(e2)}")
             return 1
+        try:
+            drop_subids()
+        except Exception as e:
+            errors.append(_("subuid и subgid: {0}").format(e))
         used = set()
         for u in accounts():
             try:
@@ -1316,6 +1589,8 @@ def sync():
         for name in sorted(used):
             try:
                 res = apply_acl(name, allp[name], other_dirs(allp, name))
+                for k in total:
+                    total[k] += res[k]
                 ensure_view(name, allp[name])
                 if res["errors"]:
                     errors.append(_("проект {0}: не удалось поставить права, объектов: {1}").format(name, res['errors']))
@@ -1346,6 +1621,10 @@ def sync():
             state_set(warned=sorted(warned), dirs={n: v["dir"] for n, v in allp.items()})
         except Exception as e:
             errors.append(_("проверка общих папок: {0}").format(e))
+        if not table_loaded():
+            errors.append(NO_TABLE)
+    log(_("sync: {0} с, объектов: {1}, изменено: {2}, ошибок: {3}").format(
+        f"{time.monotonic() - started:.1f}", total["seen"], total["changed"], total["errors"]))
     for e in errors:
         log(f"sync: {clean(e)}")
         print(f"kilt sync: {clean(e)}", file=sys.stderr)
@@ -1353,24 +1632,32 @@ def sync():
 
 
 def boot():
-    with lock():
-        try:
-            firewall()
-        except Exception as e:
-            log(_("boot: фаервол: {0}").format(clean(e)))
-        try:
-            allp = projects()
-        except Exception:
-            allp = {n: {"dir": d, "ids": [], "services": {}} for n, d in load_json(STATE, {}).get("dirs", {}).items()
-                    if safe_dir(d) == d}
-        used = set()
-        for u in accounts():
-            used |= set(user_projects(u["login"], allp))
-        for name in sorted(used):
-            try:
-                ensure_view(name, allp[name])
-            except Exception as e:
-                log(_("boot: вид проекта {0}: {1}").format(name, clean(e)))
+    """При загрузке: сначала одни запреты (без docker и без замка), потом виды проектов по папкам из state.json."""
+    try:
+        firewall_base()
+    except Exception as e:
+        log(_("boot: фаервол: {0}").format(clean(e)))
+        print(f"kilt boot: {clean(e)}", file=sys.stderr)
+    try:
+        with lock(20):
+            dirs = load_json(STATE, {}).get("dirs")
+            allp = {n: {"dir": d, "ids": [], "services": {}} for n, d in (dirs.items() if isinstance(dirs, dict) else [])
+                    if isinstance(n, str) and valid_name(n) and isinstance(d, str) and safe_dir(d) == d}
+            used = set()
+            for u in accounts():
+                used |= set(user_projects(u["login"], allp))
+            for name in sorted(used):
+                try:
+                    ensure_view(name, allp[name])
+                except Exception as e:
+                    log(_("boot: вид проекта {0}: {1}").format(name, clean(e)))
+    except Exception as e:
+        log(f"boot: {clean(e)}")
+        print(f"kilt boot: {clean(e)}", file=sys.stderr)
+    if not table_loaded():
+        log(f"boot: {NO_TABLE}")
+        print(f"kilt boot: {NO_TABLE}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -1400,6 +1687,8 @@ def as_user(args):
 
 
 def container_cmd(args):
+    global LOCK_QUIET
+    LOCK_QUIET = True
     sudo_uid = os.environ.get("SUDO_UID", "")
     if sudo_uid.isdigit() and int(sudo_uid) != 0:
         try:
@@ -1459,6 +1748,8 @@ def container_cmd(args):
                 ensure_view(name, p)
         except Exception as e:
             log(_("контейнеры: вид проекта {0}: {1}").format(name, clean(e)))
+            if isinstance(e, Busy):
+                print(e, file=sys.stderr)
 
     def containers(services):
         if not services:
@@ -1498,12 +1789,17 @@ def container_cmd(args):
         if any(a.startswith("-") for a in rest):
             sys.exit(_("Флаги здесь не поддерживаются"))
         log(f"containers {name}: {cmd} {' '.join(rest)}")
-        code = subprocess.run(["docker", cmd, *containers(rest)]).returncode
+        try:
+            code = subprocess.run(["docker", cmd, *containers(rest)], timeout=600).returncode
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(timed_out(["docker", cmd, *rest], 600)) from None
         try:
             with lock():
                 refresh()
         except Exception as e:
             log(_("контейнеры: обновление правил не удалось: {0}").format(clean(e)))
+            if isinstance(e, Busy):
+                print(e, file=sys.stderr)
         return code
     if cmd == "exec":
         if not rest or rest[0].startswith("-"):
@@ -1678,7 +1974,13 @@ def screen_add():
         box(_("✓ {0}: весь сервер, root").format(name), "", _("Пусть заходит так:"), "", f"  ssh root@{HOST}", color="42")
         return pause()
 
-    allp, levels = projects(), {}
+    levels = {}
+    try:
+        allp = projects()
+    except Exception as e:
+        if kind == K_PROJ:
+            return fail(_("Ошибка: {0}").format(e))
+        allp = {}
     if kind == K_PROJ and not allp:
         return fail(_("Проектов пока нет: kilt ищет проекты docker compose в папках {0}").format(", ".join(CLOSED)))
     login = ask_login()
@@ -1741,7 +2043,10 @@ def screen_root_person(e):
 def screen_account(u):
     login = u["login"]
     while True:
-        allp = projects()
+        try:
+            allp = projects()
+        except Exception:
+            allp = {}
         mine = user_projects(login, allp)
         items = [f"{n:<24} {P_LEVEL.get(mine.get(n), _('нет доступа'))}" for n in sorted(allp)]
         pick = choose(_("{0} — проекты (Enter — изменить)   ключ {1}…").format(login, (u['fp'] or _('нет'))[:19]),
@@ -1823,7 +2128,11 @@ def others():
 def menu():
     ADD, QUIT, SEP = _("➕ Добавить человека"), _("Выход"), _("── не через это меню ──")
     while True:
-        allp, rows = projects(), {}
+        rows, warn = {}, ""
+        try:
+            allp = projects()
+        except Exception as e:
+            allp, warn = {}, "   ⚠ " + _("проекты не загружены: {0}").format(clean(e, 150))
         for e in root_keys():
             if not e["service"]:
                 rows[_("{0:<23} весь сервер, root   {1}…").format(e['name'][:22], e['fp'][:19])] = ("root", e)
@@ -1832,7 +2141,7 @@ def menu():
             desc = ", ".join(f"{n} ({P_LEVEL[l]})" for n, l in mine.items()) or _("без проектов")
             rows[f"{u['login'][:22]:<23} {desc}"] = ("acc", u)
         extra = others()
-        pick = choose(_("Доступ к серверу {0}").format(HOST), [ADD, *rows, *([SEP, *extra] if extra else []), QUIT])
+        pick = choose(_("Доступ к серверу {0}").format(HOST) + warn, [ADD, *rows, *([SEP, *extra] if extra else []), QUIT])
         if pick is None or pick == QUIT:
             return
         try:
@@ -1851,9 +2160,15 @@ def menu():
 # ---------------------------------------------------------------- установка
 SSHD_BEGIN = "# >>> kilt: personal accounts (managed by `kilt setup`) >>>"   # маркеры в файле — не переводятся
 SSHD_END = "# <<< kilt: end of personal accounts <<<"
-SSHD_BLOCK = f"""{SSHD_BEGIN}
-Match Group {GROUP_ALL}
+SSHD_CONFIG = "/etc/ssh/sshd_config"
+SSHD_DROPIN = "/etc/ssh/sshd_config.d/00-kilt.conf"
+# Match all в конце: иначе Match из блока захватил бы строки sshd_config, которые идут после него.
+SSHD_MATCH = f"""Match Group {GROUP_ALL}
     AuthorizedKeysFile {KEYS_DIR}/%u
+    AuthorizedKeysCommand none
+    TrustedUserCAKeys none
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
     AllowTcpForwarding local
     AllowStreamLocalForwarding no
     AllowAgentForwarding no
@@ -1862,23 +2177,136 @@ Match Group {GROUP_ALL}
     GatewayPorts no
     PermitUserRC no
 Match all
-{SSHD_END}
 """
+SSHD_BLOCK = f"{SSHD_BEGIN}\n{SSHD_MATCH}{SSHD_END}\n"
+SSHD_DROPIN_TEXT = f"# kilt: personal accounts (managed by `kilt setup`, removed by `kilt uninstall`)\n{SSHD_MATCH}"
 UNITS = {
-    "kilt-sync.service": "[Unit]\nDescription=kilt: permissions, keys and network of personal accounts\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/kilt sync\n",
-    "kilt-sync.timer": "[Unit]\nDescription=kilt sync every 10 minutes\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=10min\n[Install]\nWantedBy=timers.target\n",
-    "kilt-firewall.service": "[Unit]\nDescription=kilt: network rules and project views (before sshd)\nBefore=ssh.service sshd.service\n"
-                               "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/bin/kilt boot\n[Install]\nWantedBy=multi-user.target\n",
+    "kilt-sync.service": "[Unit]\nDescription=kilt: permissions, keys and network of personal accounts\n"
+                         f"[Service]\nType=oneshot\nExecStart={BIN} sync\nTimeoutStartSec=15min\nNice=19\nIOSchedulingClass=idle\n",
+    "kilt-sync.timer": "[Unit]\nDescription=kilt sync every 10 minutes\n"
+                       "[Timer]\nOnBootSec=2min\nOnUnitActiveSec=10min\nRandomizedDelaySec=60\n[Install]\nWantedBy=timers.target\n",
+    # Без DefaultDependencies: с ними порядок «до ssh.socket» замкнулся бы в круг через basic.target.
+    "kilt-boot.service": "[Unit]\nDescription=kilt: basic network rules and project views (before sshd, without docker)\n"
+                         "DefaultDependencies=no\nAfter=local-fs.target nftables.service\n"
+                         "Before=ssh.service sshd.service ssh.socket shutdown.target\nConflicts=shutdown.target\n"
+                         "PartOf=nftables.service\nReloadPropagatedFrom=nftables.service\n"
+                         f"[Service]\nType=oneshot\nRemainAfterExit=yes\nTimeoutStartSec=30s\nExecStart={BIN} boot\n"
+                         f"ExecReload={BIN} boot\n[Install]\nWantedBy=multi-user.target\n",
 }
+OLD_UNITS = ("kilt-firewall.service",)
+LOGROTATE_CONF = f"{LOG} {{\n    weekly\n    rotate 8\n    compress\n    missingok\n    notifempty\n    create 0600 root root\n}}\n"
+KILT_FILES = ("/etc/sudoers.d/kilt", "/etc/security/limits.d/kilt.conf", SYSCTL, LOGROTATE)
 
 
-def sshd_config_with_block(old):
+def sshd_config_with_block(old, block=SSHD_BLOCK):
     start = old.find(SSHD_BEGIN)
     if start < 0:
-        return old.rstrip("\n") + "\n\n" + SSHD_BLOCK
+        return old.rstrip("\n") + "\n\n" + block if block else old
     end = old.find(SSHD_END, start)
     after = "" if end < 0 else old[end + len(SSHD_END):]
-    return old[:start] + SSHD_BLOCK + (after[1:] if after.startswith("\n") else after)
+    head = old[:start] if block else old[:start].rstrip("\n") + "\n"
+    return head + block + (after[1:] if after.startswith("\n") else after)
+
+
+def sshd_reads_dropins(text):
+    for line in text.splitlines():
+        w = line.split()
+        if not w or w[0].startswith("#"):
+            continue
+        if w[0].lower() == "match":
+            return False
+        if w[0].lower() == "include" and any(a in ("/etc/ssh/sshd_config.d/*.conf", "sshd_config.d/*.conf") for a in w[1:]):
+            return True
+    return False
+
+
+def sshd_bin():
+    return shutil.which("sshd") or "/usr/sbin/sshd"
+
+
+def sshd_test():
+    try:
+        r = subprocess.run([sshd_bin(), "-t"], capture_output=True, text=True, timeout=60)
+        return (r.stderr or r.stdout).strip() if r.returncode else None
+    except FileNotFoundError:
+        return missing("sshd")
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def sshd_apply(install=True):
+    """Блок kilt — отдельным файлом в sshd_config.d, если sshd_config его подключает; иначе блоком в самом sshd_config."""
+    old, old_drop = read_text(SSHD_CONFIG), read_text(SSHD_DROPIN)
+    if old is None:
+        raise RuntimeError(_("файл не найден: {0}").format(SSHD_CONFIG))
+    if install and sshd_reads_dropins(old):
+        new, new_drop = sshd_config_with_block(old, ""), SSHD_DROPIN_TEXT
+    else:
+        new, new_drop = sshd_config_with_block(old, SSHD_BLOCK if install else ""), None
+    if new == old and new_drop == old_drop:
+        return False
+
+    def put(path, text):
+        if text is None:
+            if os.path.lexists(path):
+                os.remove(path)
+        else:
+            os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+            write_root_file(path, text, 0o644)
+
+    def back():
+        put(SSHD_DROPIN, old_drop)
+        if new != old:
+            put(SSHD_CONFIG, old)
+
+    if new != old:
+        os.makedirs(BACKUPS, mode=0o700, exist_ok=True)
+        shutil.copy2(SSHD_CONFIG, f"{BACKUPS}/sshd_config-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+    try:
+        put(SSHD_DROPIN, new_drop)
+        if new != old:
+            put(SSHD_CONFIG, new)
+        err = sshd_test()
+    except BaseException:
+        back()
+        raise
+    if err is not None:
+        back()
+        raise RuntimeError(_("sshd не принял новые настройки — прежние возвращены: {0}").format(clean(err, 400)))
+    # ssh (Debian/Ubuntu) или sshd (RHEL); при сокет-активации служба не запущена и reload упал бы.
+    for unit in ("ssh", "sshd"):
+        try:
+            if subprocess.run(["systemctl", "try-reload-or-restart", unit], capture_output=True, timeout=60).returncode == 0:
+                break
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return True
+
+
+def sshd_blocks_kilt():
+    try:
+        out = run(sshd_bin(), "-T", check=False, timeout=30)
+    except RuntimeError:
+        return []
+    vals = {}
+    for line in out.splitlines():
+        w = line.split(None, 1)
+        if len(w) == 2 and w[0] in ("allowgroups", "allowusers"):
+            vals.setdefault(w[0], []).append(w[1].strip())
+    found = []
+    if vals.get("allowgroups") and not any(fnmatch.fnmatchcase(GROUP_ALL, g) for g in vals["allowgroups"]):
+        found.append("AllowGroups")
+    if vals.get("allowusers") and not any(u.split("@")[0] == "*" for u in vals["allowusers"]):
+        found.append("AllowUsers")
+    return found
 
 
 def bind_block_works():
@@ -1888,81 +2316,204 @@ def bind_block_works():
 
 def setup():
     global CLOSED
-    gid_of(GROUP_ALL)
-    os.makedirs(ETC, mode=0o755, exist_ok=True)
-    os.makedirs(KEYS_DIR, mode=0o755, exist_ok=True)
-    if not os.path.exists(CONF):
-        write_root_file(CONF, "{}\n", 0o644)
-    if not os.path.exists(SETTINGS):
-        closed = default_closed()
-        if not closed:
-            os.makedirs("/srv", mode=0o755, exist_ok=True)
-            closed = ["/srv"]
-        CLOSED = closed
-        write_root_file(SETTINGS, json.dumps({"host": "", "closed": closed, "service_keys": [], "language": UI_LANG},
-                                             ensure_ascii=False, indent=2) + "\n", 0o644)
-        print(_("kilt: создан {0} — проверь адрес сервера и папки с проектами").format(SETTINGS))
-    for path, mode in ((LOG, 0o600), (STATE, 0o600)):
-        if os.path.exists(path):
-            os.chmod(path, mode)
-    os.makedirs(os.path.dirname(SYSCTL), mode=0o755, exist_ok=True)
-    write_root_file(SYSCTL, "fs.protected_hardlinks = 1\nfs.protected_symlinks = 1\n", 0o644)
-    if shutil.which("sysctl"):
-        run("sysctl", "-p", SYSCTL, check=False)
-    sudoers = "/etc/sudoers.d/kilt"
-    write_root_file(sudoers + ".tmp", f"%{GROUP_ALL} ALL=(root) NOPASSWD: /usr/local/bin/kilt containers, /usr/local/bin/kilt containers *\n", 0o440)
-    try:
-        run("visudo", "-cf", sudoers + ".tmp")
-    except RuntimeError:
-        os.remove(sudoers + ".tmp")
-        raise
-    os.replace(sudoers + ".tmp", sudoers)
-    write_root_file("/etc/security/limits.d/kilt.conf",
-                    f"@{GROUP_ALL} hard nproc 256\n@{GROUP_ALL} hard nofile 4096\n@{GROUP_ALL} hard fsize 4194304\n@{GROUP_ALL} hard core 0\n", 0o644)
-    cfg = "/etc/ssh/sshd_config"
-    with open(cfg, encoding="utf-8", errors="surrogateescape", newline="") as f:
-        old = f.read()
-    new = sshd_config_with_block(old)
-    if new != old:
-        os.makedirs(BACKUPS, mode=0o700, exist_ok=True)
-        shutil.copy2(cfg, f"{BACKUPS}/sshd_config-{datetime.datetime.now():%Y%m%d-%H%M%S}")
-        write_root_file(cfg, new, 0o644)
+    with lock(300):
+        gid_of(GROUP_ALL)
+        os.makedirs(ETC, mode=0o755, exist_ok=True)
+        os.makedirs(KEYS_DIR, mode=0o755, exist_ok=True)
+        if not os.path.exists(CONF):
+            write_root_file(CONF, "{}\n", 0o644)
+        if not os.path.exists(SETTINGS):
+            closed = default_closed()
+            if not closed:
+                os.makedirs("/srv", mode=0o755, exist_ok=True)
+                closed = ["/srv"]
+            CLOSED = closed
+            write_root_file(SETTINGS, json.dumps({"host": "", "closed": closed, "service_keys": [], "language": UI_LANG},
+                                                 ensure_ascii=False, indent=2) + "\n", 0o644)
+            print(_("kilt: создан {0} — проверь адрес сервера и папки с проектами").format(SETTINGS))
+        for path, mode in ((LOG, 0o600), (STATE, 0o600)):
+            if os.path.exists(path):
+                os.chmod(path, mode)
+        os.makedirs(os.path.dirname(SYSCTL), mode=0o755, exist_ok=True)
+        write_root_file(SYSCTL, "fs.protected_hardlinks = 1\nfs.protected_symlinks = 1\n", 0o644)
+        if shutil.which("sysctl"):
+            run("sysctl", "-p", SYSCTL, check=False)
+        sudoers = "/etc/sudoers.d/kilt"
+        write_root_file(sudoers + ".tmp", f"%{GROUP_ALL} ALL=(root) NOPASSWD: {BIN} containers, {BIN} containers *\n", 0o440)
         try:
-            r = subprocess.run([shutil.which("sshd") or "/usr/sbin/sshd", "-t"], capture_output=True, text=True, timeout=60)
-            err = (r.stderr or r.stdout).strip() if r.returncode else None
-        except (OSError, subprocess.SubprocessError) as e:
-            err = missing("sshd") if isinstance(e, FileNotFoundError) else str(e)
-        if err is not None:
-            write_root_file(cfg, old, 0o644)
-            raise RuntimeError(_("sshd не принял новый блок настроек — возвращён прежний файл: {0}").format(clean(err, 400)))
-        # ssh (Debian/Ubuntu) или sshd (RHEL); при сокет-активации служба не запущена и reload упал бы.
-        for unit in ("ssh", "sshd"):
-            if subprocess.run(["systemctl", "try-reload-or-restart", unit], capture_output=True).returncode == 0:
-                break
-    for name, body in UNITS.items():
-        write_root_file(f"/etc/systemd/system/{name}", body, 0o644)
-    run("systemctl", "daemon-reload")
-    run("systemctl", "enable", "kilt-sync.timer", "kilt-firewall.service")
-    run("systemctl", "start", "kilt-sync.timer")
-    boot()
+            run("visudo", "-cf", sudoers + ".tmp")
+        except RuntimeError:
+            os.remove(sudoers + ".tmp")
+            raise
+        os.replace(sudoers + ".tmp", sudoers)
+        write_root_file("/etc/security/limits.d/kilt.conf",
+                        f"@{GROUP_ALL} hard nproc 256\n@{GROUP_ALL} hard nofile 4096\n@{GROUP_ALL} hard fsize 4194304\n"
+                        f"@{GROUP_ALL} hard core 0\n", 0o644)
+        os.makedirs(os.path.dirname(LOGROTATE), mode=0o755, exist_ok=True)
+        write_root_file(LOGROTATE, LOGROTATE_CONF, 0o644)
+        sshd_apply()
+        for name in OLD_UNITS:
+            if os.path.lexists(f"/etc/systemd/system/{name}"):
+                run("systemctl", "disable", name, check=False)
+                os.remove(f"/etc/systemd/system/{name}")
+        for name, body in UNITS.items():
+            write_root_file(f"/etc/systemd/system/{name}", body, 0o644)
+        run("systemctl", "daemon-reload", timeout=120)
+        run("systemctl", "enable", "kilt-sync.timer", "kilt-boot.service")
+        run("systemctl", "start", "kilt-sync.timer")
+    run("systemctl", "restart", "kilt-boot.service")
+    with lock(300):
+        firewall()
+    if not table_loaded():
+        raise RuntimeError(NO_TABLE)
     if not bind_block_works():
         warn = _("Внимание: systemd на этом сервере собран без BPF, поэтому запрет слушать порты не работает. "
                  "Личные учётки смогут открыть порт выше 1024.")
         log(warn)
         print(warn)
+    blocked = sshd_blocks_kilt()
+    if blocked:
+        warn = _("Внимание: в sshd задано {0}, и личные учётки kilt (группа {1}) не смогут войти. "
+                 "kilt это не меняет: поправь настройки sshd сам.").format(", ".join(blocked), GROUP_ALL)
+        log(warn)
+        print(warn)
     print(_("kilt: окружение установлено"))
+
+
+def kilt_gids():
+    return {g.gr_name: g.gr_gid for g in grp.getgrall()
+            if g.gr_name == GROUP_ALL or (g.gr_name.startswith("p-") and GID_MIN <= g.gr_gid <= GID_MAX)}
+
+
+def uninstall(args):
+    flags = set(args)
+    bad = sorted(flags - {"--remove-users", "--yes", "--purge"})
+    if bad:
+        sys.exit(_("Флаг {0} не поддерживается").format(clean(bad[0], 40)))
+    people = [u["login"] for u in accounts()]
+    if people and "--remove-users" not in flags:
+        raise RuntimeError(_("на сервере есть личные учётки kilt: {0}. Удали их в меню или запусти "
+                             "kilt uninstall --remove-users").format(", ".join(people)))
+    if "--yes" not in flags:
+        if people:
+            print(_("Будут удалены личные учётки: {0}").format(", ".join(people)))
+        try:
+            answer = input(_("Убрать kilt с этого сервера? Введи yes, чтобы продолжить: "))
+        except EOFError:
+            answer = ""
+        if answer.strip() != "yes":
+            print(_("Не подтверждено — ничего не изменено."))
+            return 1
+    log("uninstall " + " ".join(sorted(flags)))
+    removed, problems = [], []
+    with lock(300):
+        for login in people:
+            delete_user(login)
+            removed.append(_("личная учётка {0}").format(login))
+        for name in ("kilt-sync.timer", "kilt-sync.service", "kilt-boot.service", *OLD_UNITS):
+            path = f"/etc/systemd/system/{name}"
+            if os.path.lexists(path):
+                run("systemctl", "disable", "--now", name, check=False)
+                os.remove(path)
+                removed.append(path)
+        run("systemctl", "daemon-reload", check=False, timeout=120)
+        if table_loaded():
+            run("nft", "delete", "table", "inet", "kilt")
+            removed.append("nft table inet kilt")
+        for target in sorted(t for t in mount_table() if t.startswith(VIEW + "/")):
+            while target in mount_table():
+                run("umount", "-l", target)
+        if any(t.startswith(os.path.dirname(VIEW) + "/") for t in mount_table()):
+            problems.append(_("{0}: там ещё что-то примонтировано, папка не удалена").format(os.path.dirname(VIEW)))
+        elif os.path.isdir(VIEW):
+            # Только rmdir: пустые папки уходят, а файлы проекта под забытым монтированием не удалятся никогда.
+            try:
+                for name in os.listdir(VIEW):
+                    for d in (view_path(name), f"{VIEW}/{name}"):
+                        if os.path.isdir(d):
+                            os.rmdir(d)
+                for d in (VIEW, os.path.dirname(VIEW)):
+                    os.rmdir(d)
+                removed.append(os.path.dirname(VIEW))
+            except OSError as e:
+                problems.append(f"{os.path.dirname(VIEW)}: {e.strerror}")
+        groups = kilt_gids()
+        gone = dict.fromkeys(groups.values())
+        roots = [os.path.realpath(r) for r in CLOSED if os.path.isdir(r)]
+        saved = load_json(STATE, {}).get("dirs")
+        dirs = {d for d in (saved.values() if isinstance(saved, dict) else []) if isinstance(d, str)}
+        try:
+            dirs |= {v["dir"] for v in load_projects_conf().values() if isinstance(v.get("dir"), str)}
+            dirs |= {p["dir"] for p in projects().values()}
+        except Exception as e:
+            problems.append(_("проекты не загружены: {0}").format(clean(e, 150)))
+        dirs = sorted(d for d in (safe_dir(x) for x in dirs) if d)
+        if gone:
+            for root in roots:
+                acl_path(root, gone)
+            for d in dirs:
+                root = next(r for r in roots if d.startswith(r + "/"))
+                cur = root
+                for part in os.path.relpath(d, root).split("/")[:-1]:
+                    cur = os.path.join(cur, part)
+                    acl_path(cur, gone)
+                res = acl_tree(d, 0, 0, [], clear=gone)
+                if res["errors"]:
+                    problems.append(_("проект {0}: не удалось поставить права, объектов: {1}").format(d, res["errors"]))
+            removed.append(_("записи kilt в правах на файлы: {0}").format(", ".join(roots + dirs)))
+        for name in sorted(groups, key=lambda g: g == GROUP_ALL):
+            run("groupdel", name, check=False)
+            if name in {g.gr_name for g in grp.getgrall()}:
+                problems.append(_("группу {0} удалить не удалось").format(name))
+            else:
+                removed.append(_("группа {0}").format(name))
+        for path in KILT_FILES:
+            if os.path.lexists(path):
+                os.remove(path)
+                removed.append(path)
+        if sshd_apply(install=False):
+            removed.append(_("блок kilt в настройках sshd"))
+        if "--purge" in flags:
+            for path in (ETC, LOG, *sorted(glob.glob(LOG + ".*"))):
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                    removed.append(path)
+                elif os.path.lexists(path):
+                    os.remove(path)
+                    removed.append(path)
+    print(_("kilt убран с сервера:"))
+    for line in removed:
+        print("  - " + line)
+    for line in problems:
+        print("  ! " + line)
+    print(_("Ключи root в {0} не тронуты. Сам kilt лежит в {1}, удали его сам: rm {1}").format(ROOT_KEYS, BIN))
+    if "--purge" not in flags:
+        print(_("Настройки в {0} и журнал {1} оставлены: их удаляет kilt uninstall --purge").format(ETC, LOG))
+    return 1 if problems else 0
 
 
 def main():
     global HOST, CLOSED, SERVICE
     a = sys.argv[1:]
     os.umask(0o022)
+    if a[:1] == ["--version"]:
+        print(f"kilt {VERSION}")
+        return 0
     if os.geteuid() != 0:
         return as_user(a)
-    HOST, CLOSED, SERVICE = load_settings()
     if a[:1] in (["help"], ["-h"], ["--help"]):
-        print(_(__doc__) + "\n" + CONTAINER_HELP)
+        print(f"kilt {VERSION}\n\n" + _(__doc__) + "\n" + CONTAINER_HELP)
         return 0
+    try:
+        HOST, CLOSED, SERVICE = load_settings()
+    except RuntimeError as e:
+        if a[:1] in (["boot"], ["firewall"], ["sync"]):
+            try:
+                firewall_base()
+            except Exception as e2:
+                log(f"{a[0]}: {clean(e2)}")
+            log(f"{a[0]}: {clean(e)}")
+        raise
     if a[:1] == ["containers"]:
         return container_cmd(a[1:])
     if a[:1] and a[0] in CONTAINER_CMDS:
@@ -1971,11 +2522,16 @@ def main():
         return sync()
     if a[:1] == ["firewall"]:
         with lock():
-            return firewall()
+            firewall()
+        if not table_loaded():
+            raise RuntimeError(NO_TABLE)
+        return 0
     if a[:1] == ["boot"]:
         return boot()
     if a[:1] == ["setup"]:
         return setup()
+    if a[:1] == ["uninstall"]:
+        return uninstall(a[1:])
     if a:
         sys.exit(_(__doc__))
     if not shutil.which("gum"):

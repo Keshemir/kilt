@@ -4,7 +4,8 @@
     sudo python3 tests/security.py
     sudo KILT_TEST_LANG=ru python3 tests/security.py
 """
-import functools, importlib.machinery, importlib.util, json, os, platform, pwd, re, shutil, subprocess, sys, time
+import functools, grp, importlib.machinery, importlib.util, json, os, platform, pwd, re, shutil, stat, struct, subprocess
+import sys, time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = "/usr/local/bin/kilt"
@@ -78,6 +79,37 @@ def restore(path, old):
         os.remove(path)
 
 
+def acl_groups(path, attr="system.posix_acl_access"):
+    try:
+        blob = os.getxattr(path, attr, follow_symlinks=False)
+    except OSError:
+        return set()
+    entries = [struct.unpack_from("<HHI", blob, 4 + 8 * i) for i in range((len(blob) - 4) // 8)]
+    return {gid for tag, _perm, gid in entries if tag == 0x08}
+
+
+def has_acl(path):
+    for attr in ("system.posix_acl_access", "system.posix_acl_default"):
+        try:
+            os.getxattr(path, attr, follow_symlinks=False)
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def strip_acl(path):
+    for attr in ("system.posix_acl_access", "system.posix_acl_default"):
+        try:
+            os.removexattr(path, attr, follow_symlinks=False)
+        except OSError:
+            pass
+
+
+def table_loaded():
+    return run("nft", "list", "table", "inet", "kilt", check=False).returncode == 0
+
+
 # ---------------------------------------------------------------- setup
 def prepare():
     if os.geteuid() != 0:
@@ -92,6 +124,10 @@ def prepare():
     os.makedirs("/etc/kilt", mode=0o755, exist_ok=True)
     write("/etc/kilt/config.json", json.dumps({"host": "127.0.0.1", "closed": ["/srv"], "service_keys": [], "language": LANG}))
     run("systemctl", "enable", "--now", "ssh", check=False)
+    write("/etc/systemd/system/kilt-firewall.service", "[Unit]\nDescription=kilt before 0.2\n[Service]\nType=oneshot\n"
+          "RemainAfterExit=yes\nExecStart=/bin/true\n[Install]\nWantedBy=multi-user.target\n")
+    run("systemctl", "daemon-reload")
+    run("systemctl", "enable", "kilt-firewall.service")
     run(BIN, "setup")
 
     projects = {
@@ -375,8 +411,13 @@ def settings():
         write(path, good, 0o666)
         r = run(BIN, "sync", check=False)
         check("settings: a config file that everyone can write to is refused", r.returncode != 0, r.stdout + r.stderr)
+        run("nft", "delete", "table", "inet", "kilt", check=False)
+        r = run(BIN, "boot", check=False)
+        check("firewall: with a broken config.json, kilt boot still loads the base rules and exits with an error",
+              r.returncode != 0 and table_loaded(), r.stdout + r.stderr)
     finally:
         write(path, good)
+        run(BIN, "firewall", check=False)
 
 
 def revoke(k):
@@ -392,14 +433,206 @@ def revoke(k):
     check("removing access: a user ID is not given out again", pwd.getpwnam("tmp2").pw_uid != uid)
 
 
+def private_files(k):
+    write("/srv/demo/private.txt", "PRIVATE-TEXT\n", 0o600)
+    write("/srv/demo/acme.json", '{"token": "ACME-TEXT"}\n', 0o644)
+    inside = ["/srv/demo/node_modules/lib", "/srv/demo/node_modules/lib/index.js", "/srv/demo/data", "/srv/demo/data/big.bin"]
+    os.makedirs("/srv/demo/node_modules/lib", exist_ok=True)
+    os.makedirs("/srv/demo/data", exist_ok=True)
+    write("/srv/demo/node_modules/lib/index.js", "module.exports = 1\n")
+    write("/srv/demo/data/big.bin", "DATA\n")
+    for path in inside:
+        strip_acl(path)
+    path = "/etc/kilt/projects.json"
+    old = read_or_none(path)
+    try:
+        write(path, json.dumps({"demo": {"exclude": ["data"]}}))
+        k.sync()
+    finally:
+        restore(path, old)
+    mode = stat.S_IMODE(os.stat("/srv/demo/private.txt").st_mode)
+    rc, out = ssh("reader", "cat ~/demo/private.txt")
+    check('files: a file only for its owner (600) stays 600 after the sync, and "read" cannot read it',
+          mode == 0o600 and rc != 0 and "PRIVATE-TEXT" not in out, f"mode {oct(mode)}: {out}")
+    rc, out = ssh("reader", "cat ~/demo/acme.json")
+    check('files: "read" cannot read acme.json', rc != 0 and "ACME-TEXT" not in out, out)
+    touched = [p for p in inside if has_acl(p)]
+    check("files: kilt does not walk node_modules and folders from exclude", not touched, f"ACL on: {touched}")
+    home = pwd.getpwnam("reader").pw_dir
+    check("files: kilt does not write safe.directory = * into ~/.gitconfig", not os.path.exists(f"{home}/.gitconfig"))
+
+
+def naming(k):
+    for d in ("/srv/shop-a", "/srv/shop-b"):
+        os.makedirs(d, exist_ok=True)
+    lines = ["shop_v2|/srv/shop-a|web|shop_v2-web-1|aaa111", "shop-v2|/srv/shop-b|web|shop-v2-web-1|bbb222"]
+    real, seen = k.run, []
+    try:
+        for order in (lines, lines[::-1]):
+            k.run = lambda *cmd, order=order, **kw: ("\n".join(order) + "\n" if cmd[:2] == ("docker", "ps")
+                                                     else real(*cmd, **kw))
+            seen.append({p["compose"]: n for n, p in k.projects().items() if p["compose"] in ("shop_v2", "shop-v2")})
+    finally:
+        k.run = real
+        for d in ("/srv/shop-a", "/srv/shop-b"):
+            os.rmdir(d)
+    a = seen[0]
+    check("project names: shop_v2 and shop-v2 get two different names, the same in any docker ps order",
+          len(a) == 2 and a == seen[1] and a.get("shop-v2") == "shop-v2" and a.get("shop_v2", "").startswith("shop-v2-"),
+          json.dumps(seen))
+
+
+def setid(k):
+    home = pwd.getpwnam("rooter").pw_dir
+    steps = (("p-demo-rw", "read", f"{home}/b2", "touch ~/demo/setgid-was-here", "/srv/demo/setgid-was-here",
+              '"root on project" -> "read": a setgid file of p-demo-rw loses the bit and does not give write access'),
+             ("p-demo", None, f"{home}/b", "ls /run/kilt/view/demo/m", None,
+              'project removed: a setgid file of p-demo loses the bit and does not open the project'))
+    try:
+        for group, level, path, use, made, name in steps:
+            rc, out = ssh("rooter", f"cp /bin/bash ~/{os.path.basename(path)} && chgrp {group} {path} && chmod 2755 {path} "
+                                    f"&& {path} -p -c 'id -gn'")
+            if group not in out or not os.stat(path).st_mode & 0o2000:
+                check(f"removing access: {name}", None, f"setgid does not work here: {out}")
+                continue
+            k.set_project("rooter", "demo", level, k.projects())
+            rc, out = ssh("rooter", f"echo LOGGED-IN; {path} -p -c '{use}'")
+            mode = os.stat(path).st_mode
+            used = (made and os.path.exists(made)) or (not made and rc == 0)
+            check(f"removing access: {name}", "LOGGED-IN" in out and not mode & 0o6000 and not used,
+                  f"mode {oct(mode)}, rc {rc}: {out}")
+    finally:
+        k.set_project("rooter", "demo", "rw", k.projects())
+
+
+def subids(k):
+    paths = [p for p in ("/etc/subuid", "/etc/subgid") if os.path.exists(p)]
+    name = "user namespaces: no kilt account has a line in /etc/subuid or /etc/subgid"
+    if not paths:
+        return check(name, None, "this machine has no /etc/subuid or /etc/subgid")
+    uid = pwd.getpwnam("plain").pw_uid
+    for path in paths:
+        with open(path, "a") as f:
+            f.write(f"plain:300000:65536\n{uid}:370000:65536\nnot-kilt:400000:65536\n")
+    k.sync()
+    logins = {u["login"] for u in k.accounts()}
+    bad, kept = [], True
+    for path in paths:
+        lines = open(path).read().splitlines()
+        kept = kept and "not-kilt:400000:65536" in lines
+        bad += [f"{path}: {l}" for l in lines if l.split(":")[0] in logins
+                or (l.split(":")[0].isdigit() and 70000 <= int(l.split(":")[0]) <= 79999)]
+        write(path, "".join(l + "\n" for l in lines if l != "not-kilt:400000:65536"))
+    check(name + " (other lines stay)", not bad and kept, f"{bad}, other line kept: {kept}")
+
+
+def units():
+    enabled = run("systemctl", "is-enabled", "kilt-boot.service", check=False).stdout.strip()
+    active = run("systemctl", "is-active", "kilt-boot.service", check=False).stdout.strip()
+    old = os.path.exists("/etc/systemd/system/kilt-firewall.service") \
+        or os.path.lexists("/etc/systemd/system/multi-user.target.wants/kilt-firewall.service")
+    check("units: kilt-boot.service is enabled and active, the old kilt-firewall.service is removed",
+          enabled == "enabled" and active == "active" and not old, f"{enabled} {active} old unit: {old}")
+    conf = open("/etc/ssh/sshd_config").read()
+    dropin = read_or_none("/etc/ssh/sshd_config.d/00-kilt.conf") or ""
+    if re.search(r"(?im)^\s*include\s+/etc/ssh/sshd_config\.d/\*\.conf", conf):
+        check("sshd: the kilt block is in sshd_config.d/00-kilt.conf and ends with Match all",
+              "kilt" not in conf and "Match Group kilt" in dropin and dropin.rstrip().endswith("Match all"), dropin)
+    else:
+        check("sshd: the kilt block is at the end of sshd_config", "Match Group kilt" in conf and not dropin, conf[-400:])
+    rotate = read_or_none("/etc/logrotate.d/kilt") or ""
+    check("log: /etc/logrotate.d/kilt rotates /var/log/kilt.log", "/var/log/kilt.log" in rotate and "rotate 8" in rotate, rotate)
+    deny = (read_or_none("/etc/at.deny") or "").split()
+    check("at is blocked for personal accounts", {"reader", "rooter", "plain"} <= set(deny), " ".join(deny))
+    r, h = run(BIN, "--version", check=False), run(BIN, "help", check=False)
+    check("kilt --version prints the version, kilt help shows it too",
+          r.returncode == 0 and re.fullmatch(r"kilt \d+\.\d+\.\d+", r.stdout.strip()) and r.stdout.strip() in h.stdout,
+          r.stdout + r.stderr)
+    lines = [l for l in (read_or_none("/var/log/kilt.log") or "").splitlines()
+             if re.search(r"\] sync: \d+\.\d \S+, \D+: \d+, \D+: \d+, \D+: \d+$", l)]
+    check("log: every sync writes one line with its time and the numbers of files seen, changed and errors",
+          bool(lines), (read_or_none("/var/log/kilt.log") or "")[-400:])
+
+
+def boot_offline(k):
+    real, calls = k.run, []
+
+    def no_docker(*cmd, **kw):
+        if cmd[:1] == ("docker",):
+            calls.append(" ".join(cmd[:2]))
+            raise RuntimeError("docker is off in this test")
+        return real(*cmd, **kw)
+
+    run("nft", "delete", "table", "inet", "kilt", check=False)
+    k.drop_view("demo")
+    k.run = no_docker
+    try:
+        rc = k.boot()
+    finally:
+        k.run = real
+    view = k.view_ok("demo", {"dir": "/srv/demo"})
+    loaded = table_loaded()
+    k.firewall()
+    check("boot: without docker, kilt boot loads the base firewall and mounts the views from state.json",
+          rc == 0 and not calls and loaded and view, f"rc {rc}, docker calls {calls}, table {loaded}, view {view}")
+
+
+def nft_restart():
+    d = "/etc/systemd/system/nftables.service.d"
+    os.makedirs(d, exist_ok=True)
+    write(f"{d}/kilt-test.conf", "[Service]\nExecStart=\nExecStart=/usr/sbin/nft delete table inet kilt\n"
+                                 "ExecReload=\nExecReload=/usr/sbin/nft delete table inet kilt\nExecStop=\n")
+    run("systemctl", "daemon-reload")
+    try:
+        for action in ("restart", "reload"):
+            r = run("systemctl", action, "nftables.service", check=False)
+            for _ in range(20):
+                if table_loaded():
+                    break
+                time.sleep(0.5)
+            check(f"firewall: systemctl {action} nftables (which removes the kilt table) brings the kilt rules back",
+                  r.returncode == 0 and table_loaded(), r.stdout + r.stderr)
+    finally:
+        os.remove(f"{d}/kilt-test.conf")
+        run("systemctl", "daemon-reload")
+
+
+def uninstall():
+    gids = {g.gr_gid for g in grp.getgrall() if g.gr_name == "kilt" or g.gr_name.startswith("p-")}
+    r = run(BIN, "uninstall", "--remove-users", "--yes", "--purge", check=False)
+    out = r.stdout + r.stderr
+    check("uninstall: kilt uninstall --remove-users --yes --purge finishes without errors", r.returncode == 0, out)
+    check("uninstall: no nft table inet kilt", not table_loaded())
+    left = [u for u in ("kilt-sync.timer", "kilt-sync.service", "kilt-boot.service", "kilt-firewall.service")
+            if os.path.lexists(f"/etc/systemd/system/{u}")]
+    check("uninstall: no kilt units", not left, str(left))
+    files = [f for f in ("/etc/sudoers.d/kilt", "/etc/security/limits.d/kilt.conf", "/etc/sysctl.d/90-kilt.conf",
+                         "/etc/logrotate.d/kilt", "/etc/ssh/sshd_config.d/00-kilt.conf", "/etc/kilt", "/run/kilt")
+             if os.path.lexists(f)]
+    check("uninstall: no sudo rule, limits, sysctl, logrotate, sshd drop-in, /etc/kilt, /run/kilt", not files, str(files))
+    conf = open("/etc/ssh/sshd_config").read()
+    test = run(shutil.which("sshd") or "/usr/sbin/sshd", "-t", check=False)
+    check("uninstall: sshd_config has no kilt block and sshd -t passes", "kilt" not in conf and test.returncode == 0,
+          test.stderr)
+    users = [p.pw_name for p in pwd.getpwall() if 70000 <= p.pw_uid <= 79999]
+    groups = [g.gr_name for g in grp.getgrall() if g.gr_name == "kilt" or g.gr_name.startswith("p-")]
+    check("uninstall: no users in the UID range 70000-79999, no group kilt or p-*", not users and not groups,
+          f"{users} {groups}")
+    acl = {p: sorted(gids & (acl_groups(p) | acl_groups(p, "system.posix_acl_default")))
+           for p in ("/srv", "/srv/demo", "/srv/demo/README.md", "/srv/demo/.env")}
+    check("uninstall: no kilt entries in the ACLs of /srv and /srv/demo", not any(acl.values()), json.dumps(acl))
+    check("uninstall: project files stay", os.path.exists("/srv/demo/README.md") and os.path.exists("/srv/demo/.env"))
+
+
 def main():
     prepare()
     k = load_kilt()
     for login, levels in (("reader", {"demo": "read"}), ("rooter", {"demo": "rw"}), ("plain", {})):
         add_person(k, login, levels)
     p = functools.partial
-    for step in (network, p(files, k), escape, p(race, k), p(names, k), bad_projects, ports, own_key, commands,
-                 limits, settings, p(revoke, k)):
+    for step in (network, p(files, k), p(private_files, k), escape, p(race, k), p(names, k), p(naming, k), bad_projects,
+                 ports, own_key, commands, p(setid, k), p(subids, k), limits, units, settings, p(boot_offline, k),
+                 p(revoke, k), nft_restart, uninstall):
         try:
             step()
         except Exception as e:
