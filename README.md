@@ -2,7 +2,7 @@
 
 Give people SSH access to one docker compose project, not to the whole server.
 
-*Kilt* (кілт) means *key* in Kazakh. [Русская версия](README.ru.md)
+*Kilt* (кілт) means *key* in Kazakh. [Русская версия](docs/README.ru.md)
 
 ## Why
 
@@ -83,7 +83,7 @@ The menu tries to stop mistakes. To give full root, you must type a random code 
 
 ## Settings
 
-`kilt setup` creates `/etc/kilt/config.json` ([example](config.example.json)):
+`kilt setup` creates `/etc/kilt/config.json` ([example](examples/config.json)):
 
 ```json
 {
@@ -99,7 +99,7 @@ The menu tries to stop mistakes. To give full root, you must type a random code 
 - `service_keys` lists comments of root keys that the menu should not show or touch, for example a CI key.
 - `language` is `en` or `ru`. If it is empty, kilt uses the system language.
 
-kilt finds projects by their docker compose labels. If you want to rename a project, point it to another folder or hide some files, add `/etc/kilt/projects.json` ([example](projects.example.json)):
+kilt finds projects by their docker compose labels. If you want to rename a project, point it to another folder or hide some files, add `/etc/kilt/projects.json` ([example](examples/projects.json)):
 
 ```json
 {
@@ -142,7 +142,7 @@ A timer runs `kilt sync` every 10 minutes to update permissions, keys and networ
 - Users created without kilt are shown in the menu but not changed. Users in `sudo`, `docker`, `wheel`, `admin`, `lxd`, `libvirt` or `disk` are marked "same as root".
 - Removing someone's root key does not prove they are gone. They may have left another way in.
 
-More details are in [SECURITY.md](SECURITY.md).
+More details are in [SECURITY.md](.github/SECURITY.md).
 
 ## Tests
 
@@ -159,7 +159,7 @@ It changes a lot on the machine, so run it only somewhere you can throw away. Wi
 
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Please report security problems privately, as described in [SECURITY.md](SECURITY.md).
+Bug reports, ideas and pull requests are welcome. Start with [CONTRIBUTING.md](.github/CONTRIBUTING.md). Please report security problems privately, as described in [SECURITY.md](.github/SECURITY.md).
 
 ## License
 

@@ -2,7 +2,7 @@
 
 Доступ по SSH к одному проекту в docker compose, а не ко всему серверу.
 
-*Кілт* по-казахски значит «ключ». [English version](README.md)
+*Кілт* по-казахски значит «ключ». [English version](../README.md)
 
 ## Зачем
 
@@ -83,7 +83,7 @@ Root заходит как `root@server` и может всё. Остальны�
 
 ## Настройки
 
-`kilt setup` создаёт `/etc/kilt/config.json` ([пример](config.example.json)):
+`kilt setup` создаёт `/etc/kilt/config.json` ([пример](../examples/config.json)):
 
 ```json
 {
@@ -99,7 +99,7 @@ Root заходит как `root@server` и может всё. Остальны�
 - `service_keys` — комментарии ключей root, которые меню не показывает и не трогает, например ключ CI.
 - `language` — `ru` или `en`. Если пусто, kilt берёт язык системы.
 
-Проекты kilt находит сам по меткам docker compose. Если нужно переименовать проект, указать другую папку или скрыть файлы, добавьте `/etc/kilt/projects.json` ([пример](projects.example.json)):
+Проекты kilt находит сам по меткам docker compose. Если нужно переименовать проект, указать другую папку или скрыть файлы, добавьте `/etc/kilt/projects.json` ([пример](../examples/projects.json)):
 
 ```json
 {
@@ -142,7 +142,7 @@ systemd ограничивает память, процессы и процес�
 - Пользователей, заведённых не через kilt, меню показывает, но не меняет. Тех, кто в `sudo`, `docker`, `wheel`, `admin`, `lxd`, `libvirt` или `disk`, меню помечает «то же, что root».
 - Убрали ключ root — ещё не значит, что человек ушёл. Он мог оставить себе другой вход.
 
-Подробнее — в [SECURITY.md](SECURITY.md).
+Подробнее — в [SECURITY.md](../.github/SECURITY.md).
 
 ## Тесты
 
@@ -159,8 +159,8 @@ systemd ограничивает память, процессы и процес�
 
 ## Участие
 
-Будем рады сообщениям об ошибках, идеям и pull request'ам. Начните с [CONTRIBUTING.md](CONTRIBUTING.md). О проблемах с безопасностью сообщайте закрыто, как описано в [SECURITY.md](SECURITY.md).
+Будем рады сообщениям об ошибках, идеям и pull request'ам. Начните с [CONTRIBUTING.md](../.github/CONTRIBUTING.md). О проблемах с безопасностью сообщайте закрыто, как описано в [SECURITY.md](../.github/SECURITY.md).
 
 ## Лицензия
 
-MIT. Подробности — в [LICENSE](LICENSE).
+MIT. Подробности — в [LICENSE](../LICENSE).

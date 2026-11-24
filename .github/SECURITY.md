@@ -55,7 +55,7 @@ These protections are for people with **read** access or with no projects. A per
 
 ## How kilt was tested
 
-[`tests/security.py`](tests/security.py) installs kilt on a throwaway machine. It starts two test compose projects, `demo` and `other`, and adds three test accounts: one with **read** on `demo`, one with **root on project** on `demo`, and one without projects. Then it tries the attacks below. Some of these attacks worked against older versions. None of them work now.
+[`tests/security.py`](../tests/security.py) installs kilt on a throwaway machine. It starts two test compose projects, `demo` and `other`, and adds three test accounts: one with **read** on `demo`, one with **root on project** on `demo`, and one without projects. Then it tries the attacks below. Some of these attacks worked against older versions. None of them work now.
 
 1. **Network:** connect from the shell to the published ports of both projects on `127.0.0.1`, to container addresses in Docker networks, and to `169.254.169.254`. With **read**, a person cannot reach even their own project's services. With **root on project**, a person reaches only their own project. Nobody reaches cloud metadata. The internet stays open.
 2. **Files:** with **read**, open `.env`, `.git/config` and a file in a `secrets` folder, and change a project file. Open the real project path under `/srv`, and enter another person's project through `/run/kilt/view`.
