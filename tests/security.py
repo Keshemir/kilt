@@ -172,9 +172,7 @@ def add_person(k, login, levels):
     allp = k.projects()
     with k.lock():
         k.create_user(login, new_key(login))
-        for name, level in levels.items():
-            k.set_project(login, name, level, allp)
-        k.refresh(allp, only=login)
+        k.set_levels(login, levels, allp)
 
 
 # ---------------------------------------------------------------- checks
@@ -436,7 +434,7 @@ def revoke(k):
 def private_files(k):
     write("/srv/demo/private.txt", "PRIVATE-TEXT\n", 0o600)
     write("/srv/demo/acme.json", '{"token": "ACME-TEXT"}\n', 0o644)
-    inside = ["/srv/demo/node_modules/lib", "/srv/demo/node_modules/lib/index.js", "/srv/demo/data", "/srv/demo/data/big.bin"]
+    inside = ["/srv/demo/node_modules/lib", "/srv/demo/node_modules/lib/index.js", "/srv/demo/data/big.bin"]
     os.makedirs("/srv/demo/node_modules/lib", exist_ok=True)
     os.makedirs("/srv/demo/data", exist_ok=True)
     write("/srv/demo/node_modules/lib/index.js", "module.exports = 1\n")
@@ -448,6 +446,8 @@ def private_files(k):
     try:
         write(path, json.dumps({"demo": {"exclude": ["data"]}}))
         k.sync()
+        closed = {login: ssh(login, "echo IN; cat ~/demo/data/big.bin; cat ~/demo/node_modules/lib/index.js")
+                  for login in ("reader", "rooter")}
     finally:
         restore(path, old)
     mode = stat.S_IMODE(os.stat("/srv/demo/private.txt").st_mode)
@@ -458,6 +458,9 @@ def private_files(k):
     check('files: "read" cannot read acme.json', rc != 0 and "ACME-TEXT" not in out, out)
     touched = [p for p in inside if has_acl(p)]
     check("files: kilt does not walk node_modules and folders from exclude", not touched, f"ACL on: {touched}")
+    check('files: "read" and "root on project" cannot open world-readable files in node_modules and in exclude folders',
+          all("IN" in out and "DATA" not in out and "module.exports" not in out for _rc, out in closed.values()),
+          json.dumps(closed))
     home = pwd.getpwnam("reader").pw_dir
     check("files: kilt does not write safe.directory = * into ~/.gitconfig", not os.path.exists(f"{home}/.gitconfig"))
 
@@ -495,14 +498,14 @@ def setid(k):
             if group not in out or not os.stat(path).st_mode & 0o2000:
                 check(f"removing access: {name}", None, f"setgid does not work here: {out}")
                 continue
-            k.set_project("rooter", "demo", level, k.projects())
+            k.set_levels("rooter", {"demo": level}, k.projects())
             rc, out = ssh("rooter", f"echo LOGGED-IN; {path} -p -c '{use}'")
             mode = os.stat(path).st_mode
             used = (made and os.path.exists(made)) or (not made and rc == 0)
             check(f"removing access: {name}", "LOGGED-IN" in out and not mode & 0o6000 and not used,
                   f"mode {oct(mode)}, rc {rc}: {out}")
     finally:
-        k.set_project("rooter", "demo", "rw", k.projects())
+        k.set_levels("rooter", {"demo": "rw"}, k.projects())
 
 
 def subids(k):

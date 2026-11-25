@@ -26,7 +26,6 @@ These protections are for people with **read** access or with no projects. A per
 - **root.** Anyone with a root key can undo everything. Removing their key does not prove they are gone.
 - **"root on project".** It means root inside the project's containers and the right to change its files. From there, a skilled person can get root on the server. Also, if an admin or a deploy later runs a script that this person changed, it runs with the admin's rights. Give this level only to people you trust.
 - **secrets in files with normal names.** kilt finds secrets by name (`.env`, `*.key`, `secret`, `token`, `acme.json`, `.pgpass`, `.netrc`, `.npmrc`, `.envrc`, `*.tfstate`, `.git/config`, folders like `secrets` or `.ssh`…). Add other files to the project's `hide` list.
-- **files in folders that kilt does not walk.** In `node_modules`, `.venv`, `venv`, `vendor`, `site-packages` and in folders from `exclude`, only the normal Linux permissions apply. A file there that everyone can read is open for **read** too.
 - **processes inside containers.** A process that a person starts with `kilt exec` runs in the container, not under their user ID. It keeps running after you remove the person. Restart the container if you need to be sure.
 - **other users' processes.** `/proc` is not hidden. People see the processes of other users, with their command lines.
 - **sshd settings that kilt does not own.** `AllowUsers` or `AllowGroups` can lock personal accounts out (`kilt setup` warns about it). A file in `/etc/ssh/sshd_config.d/` that sorts before `00-kilt.conf` and has its own `Match` for the same users wins over kilt.
@@ -77,7 +76,7 @@ These protections are for people with **read** access or with no projects. A per
 7. **Removing access:** start a process that keeps making new copies of itself, then remove the person with the same function that the menu uses. No process may stay, the person may not log in, and the user ID may not be given out again.
 8. **Setgid files:** with **root on project**, copy `bash` to the home folder, give it the project's group and the setgid bit. Then change the level to **read**, and then take the project away. The file must lose the bit and give no access.
 9. **User namespaces:** no personal account may have a line in `/etc/subuid` or `/etc/subgid`, and the lines of other users stay.
-10. **Private files:** a `600` file stays `600` after the sync and is closed for **read**; `acme.json` is closed for **read**; kilt does not walk `node_modules` and folders from `exclude`.
+10. **Private files:** a `600` file stays `600` after the sync and is closed for **read**; `acme.json` is closed for **read**; kilt does not walk `node_modules` and folders from `exclude`, and **read** and **root on project** cannot open the files there, even files that everyone can read.
 11. **Ports, cron and at:** open a port on the server, use `ssh -R`, add a crontab; personal accounts are in `/etc/at.deny`.
 12. **Bad command input:** `--privileged`, `; id`, `$(id)`, other project names, `../../etc`, unknown commands, `exec` and `restart` with **read**.
 13. **Keys:** add a key to `~/.ssh/authorized_keys`.

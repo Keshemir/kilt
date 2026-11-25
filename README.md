@@ -108,7 +108,7 @@ kilt finds projects by their docker compose labels. A project keeps its compose 
 }
 ```
 
-The key (`shop`) is the name people see in the menu and in `~/shop`. `hide` closes more files for **read**. `exclude` lists folders that kilt does not walk at all, for example `"exclude": ["data", "uploads/cache"]` for big data folders: kilt gives them no rights, so people get only the normal Linux permissions there. This is not a way to hide files, use `hide` for that. `"files": "ro"` means that **root on project** cannot change files, which is useful for folders that CI deploys from. The project folder must be inside one of the `closed` folders.
+The key (`shop`) is the name people see in the menu and in `~/shop`. `hide` closes more files for **read**. `exclude` lists folders that kilt does not walk at all, for example `"exclude": ["data", "uploads/cache"]` for big data folders: kilt closes such a folder for the people of the project (**read** and **root on project**), and the containers still use it as before. `"files": "ro"` means that **root on project** cannot change files, which is useful for folders that CI deploys from. The project folder must be inside one of the `closed` folders.
 
 Both files must belong to root, and only root may write to them. If a file is wrong, kilt stops with an error instead of guessing.
 
@@ -122,7 +122,7 @@ Every other person is a Linux user in the group `kilt`, with a user ID between 7
 
 Each project has two groups, `p-<project>` for read and `p-<project>-rw` for root on project. kilt sets file permissions with POSIX ACLs. It opens every file once and changes the open file, so nobody can swap a folder for a link while kilt works. New files stay closed for **read** until the next sync. Secrets stay closed for **read** all the time.
 
-Files and folders that only their owner may open (mode `600` or `700`, for example `acme.json`, SSH keys or a database folder) get no kilt rights at all, so programs that check these modes keep working. Nobody with a personal account can open them, also not with **root on project**. kilt does not walk `node_modules`, `.venv`, `venv`, `vendor` and `site-packages`: the folder itself gets rights, the files inside keep their normal Linux permissions.
+Files and folders that only their owner may open (mode `600` or `700`, for example `acme.json`, SSH keys or a database folder) get no kilt rights at all, so programs that check these modes keep working. Nobody with a personal account can open them, also not with **root on project**. kilt does not walk `node_modules`, `.venv`, `venv`, `vendor` and `site-packages` either: these folders are closed for the people of the project too.
 
 People never use the real project path. They work in `/run/kilt/view/<project>/m`, a second mount of the folder with `nosuid,nodev`. A setuid program or a device file made inside a container does nothing there.
 
@@ -178,6 +178,8 @@ It changes a lot on the machine, so run it only somewhere you can throw away. Wi
 ```
 
 `tests/translations.py` checks that every menu text has an English version.
+
+`tests/unit.py` checks the file rights rules, the key checks and the project names. It needs no root and no Docker.
 
 ## Contributing
 

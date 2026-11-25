@@ -13,9 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Syntax
-        run: python3 -I -m py_compile kilt.py tests/security.py tests/translations.py
+        run: python3 -I -m py_compile kilt.py tests/security.py tests/translations.py tests/unit.py
       - name: Every Russian menu text has an English version
         run: python3 tests/translations.py
+      - name: File rights, key checks and project names (no root)
+        run: python3 tests/unit.py
 
   attack:
     runs-on: ubuntu-24.04
