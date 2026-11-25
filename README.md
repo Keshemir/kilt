@@ -114,7 +114,7 @@ Both files must belong to root, and only root may write to them. If a file is wr
 
 ## How it works
 
-kilt uses normal Linux tools and does not run a daemon.
+kilt uses normal Linux tools and does not run a daemon. Some parts look complex on purpose; [docs/DESIGN.md](docs/DESIGN.md) explains why.
 
 Root keys stay in `/root/.ssh/authorized_keys` with a `#NAME` line above each one. Before every change kilt saves a copy in `/root/.ssh/kilt-backups/`. Lines it does not understand stay as they are.
 
